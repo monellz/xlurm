@@ -94,6 +94,9 @@ pub struct JobSummary {
     pub state: State,
     pub count: usize,
     pub devices: Vec<Device>,
+    pub submitted_at: u64,
+    pub started_at: Option<u64>,
+    pub finished_at: Option<u64>,
 }
 
 impl From<&Job> for JobSummary {
@@ -105,6 +108,9 @@ impl From<&Job> for JobSummary {
             state: job.state,
             count: job.spec.count,
             devices: job.devices.clone(),
+            submitted_at: job.submitted_at,
+            started_at: job.started_at,
+            finished_at: job.result.as_ref().map(|result| result.finished_at),
         }
     }
 }

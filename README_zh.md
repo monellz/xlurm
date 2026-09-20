@@ -32,7 +32,7 @@ xcancel 3                                # 取消任务及其进程组
 | --- | --- |
 | `xrun [选项] COMMAND [ARGS...]` | 前台等待任务，转发 stdout/stderr，Ctrl-C 取消任务 |
 | `xbatch [选项] SCRIPT [ARGS...]` | 保存脚本快照后提交，不必等资源空闲 |
-| `xqueue [JOB_ID]` | 查看全机活动队列；传 ID 查看自己任务的详细结果 |
+| `xqueue [JOB_ID]` | 查看全机活动队列及等待/执行时间；传 ID 查看自己任务的详细结果 |
 | `xcancel JOB_ID` | 取消任务及其进程组，等价于 `xqueue --cancel JOB_ID` |
 | `xinfo` | 显示设备、外部占用、分配情况 |
 
@@ -50,6 +50,8 @@ xqueue 3 --log                          # 读取自己任务的输出
 xqueue --all --json
 xinfo --json
 ```
+
+`xqueue` 的时长格式为 `HH:MM:SS`，超过 24 小时后为 `D-HH:MM:SS`。排队中任务的等待时间、运行中任务的执行时间会持续增加；未启动便取消的任务以 `-` 显示执行时间。
 
 `xrun` 的调度选项写在命令名前；从命令名开始，后续参数均传给任务程序，包括 `--help`、`--gpus` 等同名选项。分隔符 `--` 可省略，原来的 `xrun -g 1 -- python train.py` 写法也兼容。
 

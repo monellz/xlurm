@@ -424,8 +424,14 @@ fn queue(paths: &Paths, args: QueueArgs) -> Result<()> {
         if args.json {
             println!("{}", serde_json::to_string_pretty(&job)?);
         } else {
+            let (wait_time, run_time) = job_times(
+                job.submitted_at,
+                job.started_at,
+                job.result.as_ref().map(|result| result.finished_at),
+                now(),
+            );
             println!(
-                "Job {}: {:?}\nName: {}\nUser: {} (UID {})\nDirectory: {}\nLog: xqueue {} --log\nDevices: {}",
+                "Job {}: {:?}\nName: {}\nUser: {} (UID {})\nDirectory: {}\nLog: xqueue {} --log\nDevices: {}\nWait time: {}\nRun time: {}",
                 job.id,
                 job.state,
                 job.spec.name,
@@ -433,7 +439,9 @@ fn queue(paths: &Paths, args: QueueArgs) -> Result<()> {
                 job.owner.uid,
                 job.spec.cwd.display(),
                 id,
-                device_names(&job.devices)
+                device_names(&job.devices),
+                format_duration(wait_time),
+                run_time.map_or_else(|| "-".into(), format_duration),
             );
             if let Some(result) = job.result {
                 println!("Exit code: {}", result.exit_code);
@@ -454,20 +462,59 @@ fn queue(paths: &Paths, args: QueueArgs) -> Result<()> {
     if args.json {
         println!("{}", serde_json::to_string_pretty(&jobs)?);
     } else {
-        println!("JOB    USER         STATE       COUNT DEVICES          NAME");
+        println!(
+            "JOB    USER         STATE       COUNT DEVICES          WAIT         RUN          NAME"
+        );
+        let timestamp = now();
         for job in jobs {
+            let (wait_time, run_time) =
+                job_times(job.submitted_at, job.started_at, job.finished_at, timestamp);
             println!(
-                "{:<6} {:<12} {:<11} {:<5} {:<16} {}",
+                "{:<6} {:<12} {:<11} {:<5} {:<16} {:<12} {:<12} {}",
                 job.id,
                 job.owner.name,
                 format!("{:?}", job.state).to_uppercase(),
                 job.count,
                 device_names(&job.devices),
+                format_duration(wait_time),
+                run_time.map_or_else(|| "-".into(), format_duration),
                 job.name.escape_debug()
             );
         }
     }
     Ok(())
+}
+
+fn job_times(
+    submitted_at: u64,
+    started_at: Option<u64>,
+    finished_at: Option<u64>,
+    timestamp: u64,
+) -> (u64, Option<u64>) {
+    match started_at {
+        Some(started_at) => (
+            started_at.saturating_sub(submitted_at),
+            Some(finished_at.unwrap_or(timestamp).saturating_sub(started_at)),
+        ),
+        None => (
+            finished_at
+                .unwrap_or(timestamp)
+                .saturating_sub(submitted_at),
+            None,
+        ),
+    }
+}
+
+fn format_duration(seconds: u64) -> String {
+    let days = seconds / 86_400;
+    let hours = seconds % 86_400 / 3_600;
+    let minutes = seconds % 3_600 / 60;
+    let seconds = seconds % 60;
+    if days > 0 {
+        format!("{days}-{hours:02}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{hours:02}:{minutes:02}:{seconds:02}")
+    }
 }
 
 fn device_names(devices: &[Device]) -> String {
@@ -479,5 +526,25 @@ fn device_names(devices: &[Device]) -> String {
             .map(|d| format!("{}:{}", d.kind, d.id))
             .collect::<Vec<_>>()
             .join(",")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_duration, job_times};
+
+    #[test]
+    fn job_times_follow_the_job_lifecycle() {
+        assert_eq!(job_times(100, None, None, 130), (30, None));
+        assert_eq!(job_times(100, Some(110), None, 135), (10, Some(25)));
+        assert_eq!(job_times(100, Some(110), Some(150), 999), (10, Some(40)));
+        assert_eq!(job_times(100, None, Some(125), 999), (25, None));
+    }
+
+    #[test]
+    fn durations_use_fixed_clock_fields_and_days() {
+        assert_eq!(format_duration(0), "00:00:00");
+        assert_eq!(format_duration(3_661), "01:01:01");
+        assert_eq!(format_duration(183_845), "2-03:04:05");
     }
 }

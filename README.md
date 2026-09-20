@@ -34,7 +34,7 @@ xcancel 3                                # Cancel a task and its process group
 | --- | --- |
 | `xrun [OPTIONS] COMMAND [ARGS...]` | Wait for a task in the foreground, forward stdout/stderr, and cancel on Ctrl-C |
 | `xbatch [OPTIONS] SCRIPT [ARGS...]` | Snapshot and submit a script without waiting for resources |
-| `xqueue [JOB_ID]` | Show the host-wide active queue; with an ID, show detailed results for your task |
+| `xqueue [JOB_ID]` | Show the host-wide active queue with wait/run times; with an ID, show detailed results for your task |
 | `xcancel JOB_ID` | Cancel a task and its process group; equivalent to `xqueue --cancel JOB_ID` |
 | `xinfo` | Show devices, external usage, and allocations |
 
@@ -52,6 +52,8 @@ xqueue 3 --log                          # Read your task's output
 xqueue --all --json
 xinfo --json
 ```
+
+`xqueue` displays durations as `HH:MM:SS`, or `D-HH:MM:SS` after 24 hours. A pending job's wait time and a running job's run time continue increasing. Jobs cancelled before starting show `-` for run time.
 
 Options for `xrun` go before the command name. Starting at the command name, all later arguments are passed to the task, including options such as `--help` and `--gpus`. The `--` separator is optional, so the older form `xrun -g 1 -- python train.py` remains supported.
 

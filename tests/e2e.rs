@@ -239,6 +239,16 @@ fn batch_snapshot_pending_cancel_and_restart_recovery() {
     ]);
     fs::write(h.dir.path().join("script with spaces.sh"), "echo modified").unwrap();
     assert_eq!(h.job(second)["state"], "PENDING");
+    let queue = String::from_utf8(h.run("xqueue", &[]).stdout).unwrap();
+    assert!(queue.contains("WAIT         RUN"));
+    let detail = String::from_utf8(h.run("xqueue", &[&second.to_string()]).stdout).unwrap();
+    assert!(detail.contains("Wait time: "));
+    assert!(detail.contains("Run time: -"));
+    let summaries: Vec<Value> =
+        serde_json::from_slice(&h.run("xqueue", &["--json"]).stdout).unwrap();
+    assert!(summaries.iter().all(|job| job["submitted_at"].is_u64()));
+    assert!(summaries.iter().all(|job| job.get("started_at").is_some()));
+    assert!(summaries.iter().all(|job| job.get("finished_at").is_some()));
     let cancelled = h.submit(&["-g", "0", "--wrap", "touch must-not-run"]);
     h.run("xcancel", &[&cancelled.to_string()]);
     h.wait_state(cancelled, "CANCELLED");
