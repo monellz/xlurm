@@ -1,7 +1,7 @@
 use crate::auth;
 use crate::device::{Backend, Inventory};
 use crate::executor::ProcessExecutor;
-use crate::model::{JobSummary, Request, Response};
+use crate::model::{JobSummary, Request, Response, now};
 use crate::scheduler::Scheduler;
 use crate::storage::{Paths, try_lock};
 use anyhow::{Context, Result, ensure};
@@ -67,6 +67,9 @@ pub fn serve(paths: Paths, backend: Backend, max_running: usize) -> Result<()> {
     let executor = ProcessExecutor::new(paths.clone());
     let mut scheduler = Scheduler::new(paths.clone(), inventory, executor, max_running)?;
     scheduler.tick()?;
+    if let Err(error) = scheduler.cleanup(now()) {
+        eprintln!("history cleanup: {error:#}");
+    }
     if paths.socket().exists() {
         fs::remove_file(paths.socket())?;
     }
@@ -83,6 +86,7 @@ pub fn serve(paths: Paths, backend: Backend, max_running: usize) -> Result<()> {
     listener.set_nonblocking(true)?;
     let _cleanup = SocketCleanup(paths.socket());
     let mut refreshed = Instant::now();
+    let mut cleaned = Instant::now();
     while !crate::interrupted() {
         // Bound client work so a stream of submissions cannot starve execution.
         for _ in 0..16 {
@@ -121,6 +125,12 @@ pub fn serve(paths: Paths, backend: Backend, max_running: usize) -> Result<()> {
             refreshed = Instant::now();
         }
         scheduler.tick()?;
+        if cleaned.elapsed() >= Duration::from_secs(60) {
+            if let Err(error) = scheduler.cleanup(now()) {
+                eprintln!("history cleanup: {error:#}");
+            }
+            cleaned = Instant::now();
+        }
         std::thread::sleep(Duration::from_millis(50));
     }
     Ok(())

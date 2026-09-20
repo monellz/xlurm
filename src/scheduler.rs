@@ -4,6 +4,9 @@ use crate::model::*;
 use crate::storage::{Paths, read_json, write_json};
 use anyhow::{Context, Result, ensure};
 use std::collections::HashSet;
+use std::fs;
+
+const HISTORY_RETENTION_SECS: u64 = 7 * 24 * 60 * 60;
 
 pub struct Scheduler<E> {
     pub store: Store,
@@ -38,6 +41,62 @@ impl<E: Executor> Scheduler<E> {
 
     fn save(&self) -> Result<()> {
         write_json(&self.paths.0.join("state.json"), &self.store)
+    }
+
+    pub fn cleanup(&mut self, timestamp: u64) -> Result<()> {
+        let expired: HashSet<_> = self
+            .store
+            .jobs
+            .iter()
+            .filter(|job| {
+                job.state.terminal()
+                    && job.result.as_ref().is_some_and(|result| {
+                        timestamp.saturating_sub(result.finished_at) >= HISTORY_RETENTION_SECS
+                    })
+            })
+            .map(|job| job.id)
+            .collect();
+        if expired.is_empty() {
+            return Ok(());
+        }
+
+        // Delete artifacts before forgetting their IDs. If cleanup or saving is
+        // interrupted, the persisted history lets the next pass retry safely.
+        // Terminal jobs no longer have a worker writing into their files.
+        for entry in fs::read_dir(self.paths.0.join("jobs"))? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some((id, extension)) = name.to_str().and_then(|name| name.split_once('.')) else {
+                continue;
+            };
+            let Ok(id) = id.parse::<u64>() else {
+                continue;
+            };
+            let is_job_file = matches!(extension, "json" | "log" | "lock" | "result" | "cancel")
+                || extension
+                    .strip_prefix("tmp.")
+                    .is_some_and(|pid| pid.parse::<u32>().is_ok());
+            if expired.contains(&id) && is_job_file {
+                match fs::remove_file(entry.path()) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
+        let retained = Store {
+            next_id: self.store.next_id,
+            jobs: self
+                .store
+                .jobs
+                .iter()
+                .filter(|job| !expired.contains(&job.id))
+                .cloned()
+                .collect(),
+        };
+        write_json(&self.paths.0.join("state.json"), &retained)?;
+        self.store = retained;
+        Ok(())
     }
 
     pub fn submit(&mut self, spec: Submission, owner: Owner) -> Result<Job> {
@@ -239,6 +298,136 @@ fn allocate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device::Backend;
+    use crate::executor::ProcessExecutor;
+
+    fn history_scheduler(paths: &Paths) -> Scheduler<ProcessExecutor> {
+        paths.initialize().unwrap();
+        Scheduler::new(
+            paths.clone(),
+            Inventory::discover(Backend::None).unwrap(),
+            ProcessExecutor::new(paths.clone()),
+            1,
+        )
+        .unwrap()
+    }
+
+    fn history_job(id: u64, state: State, finished_at: u64) -> Job {
+        Job {
+            id,
+            owner: Owner {
+                uid: 1234,
+                gid: 1234,
+                name: "alice".into(),
+            },
+            spec: Submission {
+                command: vec!["true".into()],
+                cwd: "/".into(),
+                env: Default::default(),
+                name: "history".into(),
+                count: 0,
+                kind: None,
+                time_limit: None,
+                script: None,
+            },
+            state,
+            devices: vec![],
+            submitted_at: 0,
+            started_at: Some(0),
+            result: Some(Outcome {
+                state,
+                exit_code: 0,
+                finished_at,
+                error: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn cleanup_expires_only_finished_jobs_and_preserves_ids_across_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = Paths(directory.path().join("state"));
+        let mut scheduler = history_scheduler(&paths);
+        let timestamp = 2 * HISTORY_RETENTION_SECS;
+        for (index, state) in [
+            State::Completed,
+            State::Failed,
+            State::Cancelled,
+            State::TimedOut,
+            State::Pending,
+            State::Running,
+            State::Completed,
+            State::Failed,
+            State::Completed,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = index as u64 + 1;
+            let finished_at = match id {
+                7 => timestamp - HISTORY_RETENTION_SECS + 1,
+                8 => timestamp + 100,
+                9 => timestamp - 24 * 60 * 60,
+                _ => timestamp - HISTORY_RETENTION_SECS,
+            };
+            scheduler
+                .store
+                .jobs
+                .push(history_job(id, state, finished_at));
+            for extension in ["json", "log", "lock", "result", "cancel", "tmp.123"] {
+                fs::write(paths.job(id, extension), "artifact").unwrap();
+            }
+        }
+        scheduler.store.next_id = 9;
+        scheduler.save().unwrap();
+        fs::write(paths.job(11, "log"), "unrelated").unwrap();
+        // A prior interrupted cleanup may have already removed some files.
+        fs::remove_file(paths.job(1, "log")).unwrap();
+        scheduler.cleanup(timestamp).unwrap();
+        assert_eq!(
+            scheduler
+                .store
+                .jobs
+                .iter()
+                .map(|job| job.id)
+                .collect::<Vec<_>>(),
+            vec![5, 6, 7, 8, 9]
+        );
+        for id in 1..=9 {
+            for extension in ["json", "log", "lock", "result", "cancel", "tmp.123"] {
+                assert_eq!(paths.job(id, extension).exists(), id > 4);
+            }
+        }
+        assert_eq!(fs::read(paths.job(11, "log")).unwrap(), b"unrelated");
+        let mut restarted = history_scheduler(&paths);
+        assert!(restarted.get(1).is_err());
+        assert!(restarted.get(7).is_ok());
+        restarted.cleanup(timestamp + 1).unwrap();
+        assert!(restarted.get(7).is_err());
+        assert!(restarted.get(8).is_ok());
+        let job = history_job(0, State::Pending, 0);
+        assert_eq!(restarted.submit(job.spec, job.owner).unwrap().id, 10);
+    }
+
+    #[test]
+    fn cleanup_can_retry_after_a_file_cannot_be_deleted() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = Paths(directory.path().join("state"));
+        let mut scheduler = history_scheduler(&paths);
+        scheduler
+            .store
+            .jobs
+            .push(history_job(1, State::Completed, 0));
+        scheduler.store.next_id = 1;
+        scheduler.save().unwrap();
+        fs::create_dir(paths.job(1, "log")).unwrap();
+        assert!(scheduler.cleanup(HISTORY_RETENTION_SECS).is_err());
+        assert!(scheduler.get(1).is_ok());
+        assert!(history_scheduler(&paths).get(1).is_ok());
+        fs::remove_dir(paths.job(1, "log")).unwrap();
+        scheduler.cleanup(HISTORY_RETENTION_SECS).unwrap();
+        assert!(history_scheduler(&paths).get(1).is_err());
+    }
 
     #[test]
     fn allocation_is_exclusive_and_never_mixes_vendors() {

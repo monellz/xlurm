@@ -404,3 +404,57 @@ fn background_start_and_single_daemon_lock() {
     h.run("xrun", &["-g", "0", "--", "true"]);
     h.run("xlurm", &["stop"]);
 }
+
+#[test]
+fn restart_cleans_expired_history_without_disrupting_live_jobs() {
+    let mut h = Harness::new("none", 1);
+    h.start();
+    let old = h.submit(&["-g", "0", "--wrap", "echo old-output"]);
+    h.wait_state(old, "COMPLETED");
+    let running = h.submit(&[
+        "-g",
+        "0",
+        "--wrap",
+        "while [ ! -f release ]; do sleep 0.05; done; echo survived",
+    ]);
+    h.wait_state(running, "RUNNING");
+    let pending = h.submit(&["-g", "0", "--wrap", "echo pending-output"]);
+    h.wait_state(pending, "PENDING");
+    h.run("xlurm", &["stop"]);
+    h.daemon.take().unwrap().wait().unwrap();
+
+    let state_path = h.dir.path().join("state/state.json");
+    let mut state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    state["jobs"][0]["result"]["finished_at"] =
+        Value::from(xlurm::model::now() - 7 * 24 * 60 * 60 - 1);
+    fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+    h.start();
+
+    let missing = h
+        .command("xqueue")
+        .args([&old.to_string(), "--log"])
+        .output()
+        .unwrap();
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("job not found"));
+    for entry in fs::read_dir(h.dir.path().join("state/jobs")).unwrap() {
+        assert!(
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(&format!("{old}."))
+        );
+    }
+    let history: Vec<Value> =
+        serde_json::from_slice(&h.run("xqueue", &["--all", "--json"]).stdout).unwrap();
+    assert_eq!(history.len(), 2);
+    assert_eq!(h.job(running)["state"], "RUNNING");
+    assert_eq!(h.job(pending)["state"], "PENDING");
+    fs::write(h.dir.path().join("release"), "").unwrap();
+    h.wait_state(running, "COMPLETED");
+    h.wait_state(pending, "COMPLETED");
+    assert_eq!(h.log(running), "survived\n");
+    assert_eq!(h.log(pending), "pending-output\n");
+    assert!(h.submit(&["-g", "0", "--wrap", "true"]) > pending);
+}
