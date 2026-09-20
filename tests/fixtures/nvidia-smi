@@ -1,0 +1,9 @@
+#!/bin/sh
+case "$1" in
+  --query-gpu=*) echo '0, GPU-test-uuid, Mock NVIDIA' ;;
+  --query-compute-apps=*)
+    if [ -e "$TEST_ROOT/probe-error" ]; then exit 1; fi
+    if [ -e "$TEST_ROOT/busy" ]; then echo 'GPU-test-uuid'; fi ;;
+  *) exit 1 ;;
+esac
+exit 0

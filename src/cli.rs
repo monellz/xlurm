@@ -1,0 +1,435 @@
+use crate::daemon::request;
+use crate::device::Backend;
+use crate::model::*;
+use crate::storage::Paths;
+use anyhow::{Context, Result, bail, ensure};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
+use std::ffi::OsString;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::os::unix::process::CommandExt;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+#[derive(Parser)]
+#[command(
+    name = "xlurm",
+    version,
+    propagate_version = true,
+    about = "Minimal multi-user, single-machine GPU / Ascend scheduler"
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Action,
+}
+
+#[derive(Subcommand)]
+enum Action {
+    /// Start the local scheduler in the background.
+    Start(DaemonArgs),
+    /// Run the scheduler in the foreground (for systemd or debugging).
+    Daemon(DaemonArgs),
+    /// Stop scheduling; running jobs survive and are adopted on restart.
+    Stop,
+    /// Run a command, stream its log, and return its exit code.
+    #[command(alias = "xrun")]
+    Run(RunArgs),
+    /// Submit a bash script (or --wrap command) and print the job ID.
+    #[command(alias = "xbatch")]
+    Batch(BatchArgs),
+    /// Show jobs, inspect a job, or cancel a job.
+    #[command(alias = "xqueue")]
+    Queue(QueueArgs),
+    /// Show device availability.
+    #[command(alias = "xinfo")]
+    Info(InfoArgs),
+}
+
+#[derive(Args)]
+struct DaemonArgs {
+    #[arg(long, value_enum, default_value = "auto")]
+    backend: Backend,
+    /// Maximum concurrent jobs, including CPU-only jobs.
+    #[arg(long, default_value_t = 32)]
+    max_running: usize,
+}
+
+#[derive(Args)]
+struct Resources {
+    /// Number of exclusive accelerator devices; 0 runs a CPU-only job.
+    #[arg(short = 'g', long, visible_alias = "devices", default_value_t = 1)]
+    gpus: usize,
+    /// Restrict the vendor; otherwise use the first pool that fits.
+    #[arg(long, value_enum)]
+    device: Option<Kind>,
+    #[arg(short = 'n', long)]
+    name: Option<String>,
+    /// Wall-clock limit in seconds, measured from process launch.
+    #[arg(short = 't', long)]
+    time_limit: Option<u64>,
+}
+
+#[derive(Args)]
+struct RunArgs {
+    #[command(flatten)]
+    resources: Resources,
+    /// Command and its arguments; put scheduler options before the command.
+    #[arg(required = true, trailing_var_arg = true)]
+    command: Vec<String>,
+}
+
+#[derive(Args)]
+struct BatchArgs {
+    #[command(flatten)]
+    resources: Resources,
+    /// Execute this command using bash -c instead of a script.
+    #[arg(long, conflicts_with_all = ["script", "args"], required_unless_present = "script")]
+    wrap: Option<String>,
+    /// Bash script, copied into the job at submission time.
+    #[arg(required_unless_present = "wrap")]
+    script: Option<PathBuf>,
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    args: Vec<String>,
+}
+
+#[derive(Args)]
+struct QueueArgs {
+    /// Include finished jobs.
+    #[arg(short, long)]
+    all: bool,
+    /// Inspect an owned job, including its owner and exit result.
+    #[arg(value_name = "JOB_ID", conflicts_with = "cancel")]
+    id: Option<u64>,
+    /// Cancel a pending or running job (including its process group).
+    #[arg(long)]
+    cancel: Option<u64>,
+    /// Read this job's output through the authenticated local socket.
+    #[arg(long, requires = "id")]
+    log: bool,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct InfoArgs {
+    #[arg(long)]
+    json: bool,
+}
+
+pub fn run(wrapper: Option<&str>) -> Result<i32> {
+    let original: Vec<OsString> = std::env::args_os().collect();
+    if original.get(1).is_some_and(|arg| arg == "__worker") {
+        ensure!(original.len() == 4, "invalid worker arguments");
+        let id = original[2].to_str().context("invalid job ID")?.parse()?;
+        let fd = original[3]
+            .to_str()
+            .context("invalid descriptor")?
+            .parse()?;
+        crate::executor::worker(&Paths::discover()?, id, fd)?;
+        return Ok(0);
+    }
+    let mut argv = original;
+    let cli = if argv.get(1).is_some_and(|arg| arg == "__daemon") {
+        argv[1] = "daemon".into();
+        Cli::parse_from(argv)
+    } else if let Some(wrapper) = wrapper {
+        let name = match wrapper {
+            "run" => "xrun",
+            "batch" => "xbatch",
+            "queue" => "xqueue",
+            "info" => "xinfo",
+            _ => bail!("unknown command wrapper"),
+        };
+        let parser = Cli::command()
+            .find_subcommand(wrapper)
+            .unwrap()
+            .clone()
+            .name(name)
+            .bin_name(name)
+            .version(env!("CARGO_PKG_VERSION"));
+        let matches = parser.get_matches_from(argv);
+        let command = match wrapper {
+            "run" => Action::Run(RunArgs::from_arg_matches(&matches)?),
+            "batch" => Action::Batch(BatchArgs::from_arg_matches(&matches)?),
+            "queue" => Action::Queue(QueueArgs::from_arg_matches(&matches)?),
+            "info" => Action::Info(InfoArgs::from_arg_matches(&matches)?),
+            _ => unreachable!(),
+        };
+        Cli { command }
+    } else {
+        Cli::parse_from(argv)
+    };
+    let paths = Paths::discover()?;
+    match cli.command {
+        Action::Start(args) => start(&paths, args)?,
+        Action::Daemon(args) => crate::daemon::serve(paths, args.backend, args.max_running)?,
+        Action::Stop => {
+            request(&paths, &Request::Stop)?;
+            println!("Scheduler stopped; running jobs continue.");
+        }
+        Action::Run(args) => {
+            crate::install_signals()?;
+            let spec = submission(args.resources, args.command, None)?;
+            let job = submit(&paths, spec)?;
+            eprintln!("Job {}", job.id);
+            return follow(&paths, job.id);
+        }
+        Action::Batch(args) => {
+            let (command, script, default_name) = if let Some(wrap) = args.wrap {
+                (vec!["bash".into(), "-c".into(), wrap], None, None)
+            } else {
+                let path = args.script.context("script is required")?;
+                let text = fs::read_to_string(&path)
+                    .with_context(|| format!("cannot read {}", path.display()))?;
+                (
+                    args.args,
+                    Some(text),
+                    path.file_name().map(|n| n.to_string_lossy().into_owned()),
+                )
+            };
+            let mut resources = args.resources;
+            if resources.name.is_none() {
+                resources.name = default_name;
+            }
+            let job = submit(&paths, submission(resources, command, script)?)?;
+            println!("{}", job.id);
+        }
+        Action::Queue(args) => queue(&paths, args)?,
+        Action::Info(args) => {
+            let Response::Info(devices) = request(&paths, &Request::Info)? else {
+                bail!("unexpected response");
+            };
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&devices)?);
+            } else {
+                println!("DEVICE       STATUS      JOB    NAME");
+                for view in devices {
+                    println!(
+                        "{:<12} {:<11} {:<6} {}",
+                        format!("{}:{}", view.device.kind, view.device.id),
+                        view.status,
+                        view.job
+                            .map(|id| id.to_string())
+                            .unwrap_or_else(|| "-".into()),
+                        view.device.name
+                    );
+                }
+            }
+        }
+    }
+    Ok(0)
+}
+
+fn submission(
+    resources: Resources,
+    command: Vec<String>,
+    script: Option<String>,
+) -> Result<Submission> {
+    ensure!(
+        resources.time_limit != Some(0),
+        "time-limit must be positive"
+    );
+    Ok(Submission {
+        name: resources
+            .name
+            .unwrap_or_else(|| command.first().cloned().unwrap_or_else(|| "batch".into())),
+        command,
+        cwd: std::env::current_dir()?,
+        env: std::env::vars().collect(),
+        count: resources.gpus,
+        kind: resources.device,
+        time_limit: resources.time_limit,
+        script,
+    })
+}
+
+fn submit(paths: &Paths, spec: Submission) -> Result<Job> {
+    let Response::Job(job) = request(paths, &Request::Submit(spec))? else {
+        bail!("unexpected response");
+    };
+    Ok(*job)
+}
+
+fn start(paths: &Paths, args: DaemonArgs) -> Result<()> {
+    if request(paths, &Request::Info).is_ok() {
+        println!("xlurm is already running");
+        return Ok(());
+    }
+    ensure!(args.max_running > 0, "max-running must be positive");
+    paths.initialize()?;
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(paths.0.join("daemon.log"))?;
+    let mut command = Command::new(std::env::current_exe()?);
+    command
+        .arg("__daemon")
+        .arg("--backend")
+        .arg(format!("{:?}", args.backend).to_lowercase())
+        .arg("--max-running")
+        .arg(args.max_running.to_string())
+        .env("XLURM_HOME", &paths.0)
+        .stdin(Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log);
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn()?;
+    let deadline = Instant::now() + Duration::from_secs(45);
+    loop {
+        if request(paths, &Request::Info).is_ok() {
+            println!("xlurm started");
+            return Ok(());
+        }
+        if let Some(status) = child.try_wait()? {
+            bail!(
+                "daemon exited ({status}); see {}",
+                paths.0.join("daemon.log").display()
+            );
+        }
+        if Instant::now() >= deadline {
+            // Never leave an unannounced daemon starting after reporting failure.
+            child.kill()?;
+            child.wait()?;
+            bail!(
+                "daemon startup timed out; see {}",
+                paths.0.join("daemon.log").display()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn follow(paths: &Paths, id: u64) -> Result<i32> {
+    let mut offset = 0;
+    let mut cancelled = false;
+    loop {
+        if crate::interrupted() && !cancelled {
+            request(paths, &Request::Cancel(id))?;
+            cancelled = true;
+        }
+        let Response::Job(job) = request(paths, &Request::Get(id))? else {
+            bail!("unexpected response");
+        };
+        let mut drained = false;
+        for _ in 0..16 {
+            if !print_log_chunk(paths, id, &mut offset)? {
+                drained = true;
+                break;
+            }
+        }
+        if let Some(result) = &job.result
+            && drained
+        {
+            if let Some(error) = &result.error {
+                eprintln!("Job {id}: {error}");
+            }
+            return Ok(result.exit_code);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn print_log_chunk(paths: &Paths, id: u64, offset: &mut u64) -> Result<bool> {
+    let Response::Log {
+        bytes,
+        offset: next,
+    } = request(
+        paths,
+        &Request::Log {
+            id,
+            offset: *offset,
+        },
+    )?
+    else {
+        bail!("unexpected log response");
+    };
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all(&bytes)?;
+    stdout.flush()?;
+    *offset = next;
+    Ok(!bytes.is_empty())
+}
+
+fn queue(paths: &Paths, args: QueueArgs) -> Result<()> {
+    if let Some(id) = args.cancel {
+        request(paths, &Request::Cancel(id))?;
+        println!("Cancellation requested for job {id}");
+        return Ok(());
+    }
+    if let Some(id) = args.id {
+        let Response::Job(job) = request(paths, &Request::Get(id))? else {
+            bail!("unexpected response");
+        };
+        if args.log {
+            let mut offset = 0;
+            while print_log_chunk(paths, id, &mut offset)? {}
+            return Ok(());
+        }
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&job)?);
+        } else {
+            println!(
+                "Job {}: {:?}\nName: {}\nUser: {} (UID {})\nDirectory: {}\nLog: xqueue {} --log\nDevices: {}",
+                job.id,
+                job.state,
+                job.spec.name,
+                job.owner.name,
+                job.owner.uid,
+                job.spec.cwd.display(),
+                id,
+                device_names(&job.devices)
+            );
+            if let Some(result) = job.result {
+                println!("Exit code: {}", result.exit_code);
+                if let Some(error) = result.error {
+                    println!("Error: {error}");
+                }
+            }
+        }
+        return Ok(());
+    }
+    let Response::Queue(jobs) = request(paths, &Request::Queue)? else {
+        bail!("unexpected response");
+    };
+    let jobs: Vec<_> = jobs
+        .into_iter()
+        .filter(|j| args.all || !j.state.terminal())
+        .collect();
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&jobs)?);
+    } else {
+        println!("JOB    USER         STATE       COUNT DEVICES          NAME");
+        for job in jobs {
+            println!(
+                "{:<6} {:<12} {:<11} {:<5} {:<16} {}",
+                job.id,
+                job.owner.name,
+                format!("{:?}", job.state).to_uppercase(),
+                job.count,
+                device_names(&job.devices),
+                job.name.escape_debug()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn device_names(devices: &[Device]) -> String {
+    if devices.is_empty() {
+        "-".into()
+    } else {
+        devices
+            .iter()
+            .map(|d| format!("{}:{}", d.kind, d.id))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}

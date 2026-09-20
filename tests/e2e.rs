@@ -1,0 +1,406 @@
+use serde_json::Value;
+use std::fs;
+use std::os::unix::fs::symlink;
+use std::path::Path;
+use std::process::{Child, Command, Output, Stdio};
+use std::thread::sleep;
+use std::time::{Duration, Instant};
+use tempfile::TempDir;
+
+struct Harness {
+    dir: TempDir,
+    daemon: Option<Child>,
+    backend: &'static str,
+    max_running: usize,
+}
+
+impl Harness {
+    fn new(backend: &'static str, max_running: usize) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("bin")).unwrap();
+        Self {
+            dir,
+            daemon: None,
+            backend,
+            max_running,
+        }
+    }
+
+    fn command(&self, binary: &str) -> Command {
+        let path = match binary {
+            "xlurm" => env!("CARGO_BIN_EXE_xlurm"),
+            "xrun" => env!("CARGO_BIN_EXE_xrun"),
+            "xbatch" => env!("CARGO_BIN_EXE_xbatch"),
+            "xqueue" => env!("CARGO_BIN_EXE_xqueue"),
+            "xinfo" => env!("CARGO_BIN_EXE_xinfo"),
+            _ => panic!("unknown binary"),
+        };
+        let mut command = Command::new(path);
+        command
+            .current_dir(self.dir.path())
+            .env("XLURM_HOME", self.dir.path().join("state"))
+            .env(
+                "PATH",
+                format!("{}:/usr/bin:/bin", self.dir.path().join("bin").display()),
+            )
+            .env("TEST_ROOT", self.dir.path());
+        command
+    }
+
+    fn run(&self, binary: &str, args: &[&str]) -> Output {
+        let output = self.command(binary).args(args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{binary} {args:?}: {}\nDaemon log:\n{}",
+            String::from_utf8_lossy(&output.stderr),
+            fs::read_to_string(self.dir.path().join("daemon.log")).unwrap_or_default()
+        );
+        output
+    }
+
+    fn start(&mut self) {
+        let log = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.dir.path().join("daemon.log"))
+            .unwrap();
+        self.daemon = Some(
+            self.command("xlurm")
+                .args([
+                    "daemon",
+                    "--backend",
+                    self.backend,
+                    "--max-running",
+                    &self.max_running.to_string(),
+                ])
+                .stdout(log.try_clone().unwrap())
+                .stderr(log)
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if self
+                .command("xinfo")
+                .arg("--json")
+                .output()
+                .unwrap()
+                .status
+                .success()
+            {
+                break;
+            }
+            assert!(
+                self.daemon.as_mut().unwrap().try_wait().unwrap().is_none(),
+                "daemon died: {}",
+                fs::read_to_string(self.dir.path().join("daemon.log")).unwrap()
+            );
+            assert!(Instant::now() < deadline, "daemon startup timeout");
+            sleep(Duration::from_millis(25));
+        }
+    }
+
+    fn submit(&self, args: &[&str]) -> u64 {
+        String::from_utf8(self.run("xbatch", args).stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    }
+
+    fn job(&self, id: u64) -> Value {
+        serde_json::from_slice(&self.run("xqueue", &[&id.to_string(), "--json"]).stdout).unwrap()
+    }
+
+    fn wait_state(&self, id: u64, state: &str) -> Value {
+        let deadline = Instant::now() + Duration::from_secs(12);
+        loop {
+            let job = self.job(id);
+            if job["state"] == state {
+                return job;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "job {id}: wanted {state}, got {job}"
+            );
+            sleep(Duration::from_millis(30));
+        }
+    }
+
+    fn log(&self, id: u64) -> String {
+        fs::read_to_string(self.dir.path().join(format!("state/jobs/{id}.log"))).unwrap()
+    }
+
+    fn drivers(&self) {
+        // Do not write executables while other test threads spawn processes:
+        // fork can inherit the writer before CLOEXEC takes effect, making a
+        // just-written script fail with ETXTBSY even after fs::write returns.
+        // Links also work when the test's temporary directory is mounted noexec.
+        for name in ["nvidia-smi", "npu-smi"] {
+            symlink(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures")
+                    .join(name),
+                self.dir.path().join("bin").join(name),
+            )
+            .unwrap();
+        }
+    }
+}
+
+impl Drop for Harness {
+    fn drop(&mut self) {
+        // Best effort cleanup also runs when assertions panic.
+        if let Ok(output) = self.command("xqueue").args(["--all", "--json"]).output()
+            && let Ok(jobs) = serde_json::from_slice::<Vec<Value>>(&output.stdout)
+        {
+            for job in jobs {
+                if job["state"] == "RUNNING" || job["state"] == "PENDING" {
+                    let _ = self
+                        .command("xqueue")
+                        .args(["--cancel", &job["id"].to_string()])
+                        .output();
+                }
+            }
+        }
+        if let Some(mut daemon) = self.daemon.take() {
+            let _ = self.command("xlurm").arg("stop").output();
+            let _ = daemon.kill();
+            let _ = daemon.wait();
+        }
+    }
+}
+
+#[test]
+fn foreground_preserves_arguments_environment_logs_and_exit_status() {
+    let mut h = Harness::new("none", 4);
+    h.start();
+    let output = h.command("xrun").env("SUBMIT_ONLY", "hello from submitter")
+        .args(["-g", "0", "sh", "-c",
+            "printf '%s|%s|%s|%s' \"$1\" \"$SUBMIT_ONLY\" \"$CUDA_VISIBLE_DEVICES\" \"$ASCEND_RT_VISIBLE_DEVICES\"; shift; printf '<%s>' \"$@\"; echo err >&2; exit 7",
+            "name", "a 'quote' $(touch injected); with spaces", "--gpus", "2", "--name", "payload", "--help", "--", "-7"])
+        .output().unwrap();
+    assert_eq!(output.status.code(), Some(7));
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("a 'quote' $(touch injected); with spaces|hello from submitter|-1|-1"));
+    assert!(text.contains("<--gpus><2><--name><payload><--help><--><-7>"));
+    assert!(text.contains("err"));
+    assert!(!h.dir.path().join("injected").exists());
+    let failed = h.wait_state(1, "FAILED");
+    assert_eq!(failed["result"]["exit_code"], 7);
+    let missing = h
+        .command("xrun")
+        .args(["-g", "0", "--", "/does-not-exist-xlurm"])
+        .output()
+        .unwrap();
+    assert!(!missing.status.success());
+    assert!(
+        h.job(2)["result"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("cannot execute")
+    );
+    assert!(
+        !h.command("xrun")
+            .args(["--", "true"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+}
+
+#[test]
+fn batch_snapshot_pending_cancel_and_restart_recovery() {
+    let mut h = Harness::new("none", 1);
+    h.start();
+    let first = h.submit(&[
+        "-g",
+        "0",
+        "--wrap",
+        "echo once >> starts; while [ ! -f release ]; do sleep 0.05; done; echo survived",
+    ]);
+    h.wait_state(first, "RUNNING");
+    while !h.dir.path().join("starts").exists() {
+        sleep(Duration::from_millis(20));
+    }
+    fs::write(
+        h.dir.path().join("script with spaces.sh"),
+        "printf 'original:%s:%s' \"$1\" \"$2\"",
+    )
+    .unwrap();
+    let second = h.submit(&[
+        "-g",
+        "0",
+        "script with spaces.sh",
+        "--label",
+        "arg with space",
+    ]);
+    fs::write(h.dir.path().join("script with spaces.sh"), "echo modified").unwrap();
+    assert_eq!(h.job(second)["state"], "PENDING");
+    let cancelled = h.submit(&["-g", "0", "--wrap", "touch must-not-run"]);
+    h.run("xqueue", &["--cancel", &cancelled.to_string()]);
+    h.wait_state(cancelled, "CANCELLED");
+
+    let mut daemon = h.daemon.take().unwrap();
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+    // Existing work survives abrupt scheduler death; a restarted daemon adopts it.
+    h.start();
+    assert_eq!(h.job(first)["state"], "RUNNING");
+    assert_eq!(h.job(second)["state"], "PENDING");
+    fs::write(h.dir.path().join("release"), "").unwrap();
+    h.wait_state(first, "COMPLETED");
+    h.wait_state(second, "COMPLETED");
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("starts")).unwrap(),
+        "once\n"
+    );
+    assert_eq!(h.log(second), "original:--label:arg with space");
+    assert!(!h.dir.path().join("must-not-run").exists());
+    // Completed results and monotonically increasing IDs survive a clean restart.
+    h.run("xlurm", &["stop"]);
+    h.daemon.as_mut().unwrap().wait().unwrap();
+    h.daemon = None;
+    h.start();
+    assert_eq!(h.job(first)["state"], "COMPLETED");
+    assert!(h.submit(&["-g", "0", "--wrap", "true"]) > cancelled);
+}
+
+#[test]
+fn both_vendors_are_exclusive_and_external_busy_or_unknown_devices_wait() {
+    let mut h = Harness::new("auto", 4);
+    h.drivers();
+    fs::write(h.dir.path().join("busy"), "").unwrap();
+    h.start();
+    let devices: Vec<Value> = serde_json::from_slice(&h.run("xinfo", &["--json"]).stdout).unwrap();
+    assert_eq!(
+        devices.len(),
+        3,
+        "mock inventory was not discovered: {devices:?}\n{}",
+        fs::read_to_string(h.dir.path().join("daemon.log")).unwrap()
+    );
+    assert_eq!(devices[0]["device"]["visible"], "GPU-test-uuid");
+    assert_eq!(devices[1]["device"]["visible"], "2");
+    assert_eq!(devices[2]["device"]["visible"], "3");
+    let gpu = h.submit(&[
+        "--device",
+        "nvidia",
+        "--wrap",
+        "echo \"$CUDA_VISIBLE_DEVICES\"; while [ ! -f release ]; do sleep 0.05; done",
+    ]);
+    assert_eq!(h.job(gpu)["state"], "PENDING");
+    let npu = h.run(
+        "xrun",
+        &[
+            "--device",
+            "ascend",
+            "-g",
+            "2",
+            "--",
+            "sh",
+            "-c",
+            "printf '%s|%s' \"$ASCEND_RT_VISIBLE_DEVICES\" \"$ASCEND_DEVICE_ID\"",
+        ],
+    );
+    assert_eq!(String::from_utf8(npu.stdout).unwrap(), "2,3|0");
+    assert!(
+        fs::read_to_string(h.dir.path().join("npu-queries"))
+            .unwrap()
+            .contains("-i 4 -c 1")
+    );
+    fs::write(h.dir.path().join("probe-error"), "").unwrap();
+    fs::remove_file(h.dir.path().join("busy")).unwrap();
+    // Wait until xinfo observes failed monitoring instead of guessing idle.
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let devices: Vec<Value> =
+            serde_json::from_slice(&h.run("xinfo", &["--json"]).stdout).unwrap();
+        if devices[0]["status"] == "unknown" {
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        sleep(Duration::from_millis(100));
+    }
+    assert_eq!(h.job(gpu)["state"], "PENDING");
+    fs::remove_file(h.dir.path().join("probe-error")).unwrap();
+    h.wait_state(gpu, "RUNNING");
+    let next = h.submit(&["--device", "nvidia", "--wrap", "echo second"]);
+    assert_eq!(h.job(next)["state"], "PENDING");
+    assert!(
+        !h.command("xbatch")
+            .args(["-g", "3", "--wrap", "true"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    fs::write(h.dir.path().join("release"), "").unwrap();
+    h.wait_state(gpu, "COMPLETED");
+    h.wait_state(next, "COMPLETED");
+    assert_eq!(h.log(gpu), "GPU-test-uuid\n");
+}
+
+#[test]
+fn cancellation_and_timeout_kill_process_groups() {
+    let mut h = Harness::new("none", 2);
+    h.start();
+    let mut run = h
+        .command("xrun")
+        .args([
+            "-g",
+            "0",
+            "--",
+            "sh",
+            "-c",
+            "trap '' TERM; sleep 60 & echo $! > child.pid; wait",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while !h.dir.path().join("child.pid").exists() {
+        assert!(Instant::now() < deadline);
+        sleep(Duration::from_millis(25));
+    }
+    let pid: i32 = fs::read_to_string(h.dir.path().join("child.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    unsafe {
+        libc::kill(run.id() as i32, libc::SIGINT);
+    }
+    loop {
+        if let Some(status) = run.try_wait().unwrap() {
+            assert_eq!(status.code(), Some(130));
+            break;
+        }
+        assert!(Instant::now() < deadline, "xrun did not cancel");
+        sleep(Duration::from_millis(25));
+    }
+    h.wait_state(1, "CANCELLED");
+    assert!(
+        !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+        "grandchild survived cancellation"
+    );
+    let timed = h.submit(&["-g", "0", "--time-limit", "1", "--wrap", "sleep 60"]);
+    assert_eq!(h.wait_state(timed, "TIMED_OUT")["result"]["exit_code"], 124);
+}
+
+#[test]
+fn background_start_and_single_daemon_lock() {
+    let h = Harness::new("none", 2);
+    h.run("xlurm", &["start", "--backend", "none"]);
+    h.run("xlurm", &["start", "--backend", "none"]);
+    let duplicate = h
+        .command("xlurm")
+        .args(["daemon", "--backend", "none"])
+        .output()
+        .unwrap();
+    assert!(!duplicate.status.success());
+    assert!(String::from_utf8_lossy(&duplicate.stderr).contains("already running"));
+    h.run("xrun", &["-g", "0", "--", "true"]);
+    h.run("xlurm", &["stop"]);
+}
