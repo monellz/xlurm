@@ -1,7 +1,7 @@
 use crate::daemon::request;
 use crate::device::Backend;
 use crate::model::*;
-use crate::storage::Paths;
+use crate::storage::{Paths, read_json, try_lock};
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use std::ffi::OsString;
@@ -32,6 +32,8 @@ enum Action {
     Daemon(DaemonArgs),
     /// Stop scheduling; running jobs survive and are adopted on restart.
     Stop,
+    /// Remove all logs while the scheduler is stopped and no job is running.
+    Clean,
     /// Run a command, stream its log, and return its exit code.
     #[command(alias = "xrun")]
     Run(RunArgs),
@@ -179,6 +181,7 @@ pub fn run(wrapper: Option<&str>) -> Result<i32> {
             request(&paths, &Request::Stop)?;
             println!("Scheduler stopped; running jobs continue.");
         }
+        Action::Clean => clean(&paths)?,
         Action::Run(args) => {
             crate::install_signals()?;
             let spec = submission(args.resources, args.command, None)?;
@@ -230,6 +233,70 @@ pub fn run(wrapper: Option<&str>) -> Result<i32> {
         }
     }
     Ok(0)
+}
+
+fn clean(paths: &Paths) -> Result<()> {
+    paths.initialize()?;
+    let _lock = try_lock(&paths.0.join("daemon.lock"))?
+        .context("xlurm is running; stop the scheduler before cleaning logs")?;
+    let state_path = paths.0.join("state.json");
+    let store = if state_path.exists() {
+        read_json::<Store>(&state_path)?
+    } else {
+        Store::default()
+    };
+    let running: Vec<_> = store
+        .jobs
+        .iter()
+        .filter(|job| job.state == State::Running)
+        .map(|job| job.id.to_string())
+        .collect();
+    ensure!(
+        running.is_empty(),
+        "cannot clean logs while jobs are running: {}",
+        running.join(", ")
+    );
+
+    let mut job_logs = 0;
+    let jobs_path = paths.0.join("jobs");
+    for entry in
+        fs::read_dir(&jobs_path).with_context(|| format!("cannot read {}", jobs_path.display()))?
+    {
+        let entry = entry?;
+        let name = entry.file_name();
+        let is_job_log = name
+            .to_str()
+            .and_then(|name| name.split_once('.'))
+            .is_some_and(|(id, extension)| id.parse::<u64>().is_ok() && extension == "log");
+        if is_job_log {
+            match fs::remove_file(entry.path()) {
+                Ok(()) => job_logs += 1,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("cannot remove {}", entry.path().display()));
+                }
+            }
+        }
+    }
+    let daemon_log_path = paths.0.join("daemon.log");
+    let daemon_log = match fs::remove_file(&daemon_log_path) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("cannot remove {}", daemon_log_path.display()));
+        }
+    };
+    println!(
+        "Removed {job_logs} job log(s){}.",
+        if daemon_log {
+            " and daemon.log"
+        } else {
+            "; daemon.log was already absent"
+        }
+    );
+    Ok(())
 }
 
 fn submission(

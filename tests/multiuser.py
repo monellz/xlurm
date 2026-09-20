@@ -129,7 +129,16 @@ def main():
                 peer.connect(str(root / "state" / "xlurm.sock"))
                 peer.sendall(json.dumps(message).encode() + b"\n")
                 assert "Error" in json.loads(peer.makefile("rb").readline())
-            print("PASS: real UID/GID/groups, shared queue, private spool/logs, owner cancellation, admin control")
+            # Log cleanup is offline and restricted to the state owner.
+            command("xlurm", ["stop"])
+            daemon.wait(timeout=5)
+            bob_log = root / "state" / "jobs" / f"{second}.log"
+            assert bob_log.exists()
+            assert command("xlurm", ["clean"], bob, check=False).returncode != 0
+            assert bob_log.exists()
+            command("xlurm", ["clean"])
+            assert not bob_log.exists()
+            print("PASS: real UID/GID/groups, shared queue, private spool/logs, owner cancellation, admin control and cleanup")
         finally:
             for job_id in active:
                 command("xqueue", ["--cancel", str(job_id)], check=False)

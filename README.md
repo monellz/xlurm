@@ -37,6 +37,7 @@ xcancel 3                                # Cancel a task and its process group
 | `xqueue [JOB_ID]` | Show the host-wide active queue with wait/run times; with an ID, show detailed results for your task |
 | `xcancel JOB_ID` | Cancel a task and its process group; equivalent to `xqueue --cancel JOB_ID` |
 | `xinfo` | Show devices, external usage, and allocations |
+| `sudo xlurm clean` | Remove all logs while the scheduler is stopped and no task is running |
 
 There are only four task options: `-g/--gpus N` (also `--devices`, default `1`), `--device nvidia|ascend`, `-n/--name NAME`, and `-t/--time-limit SECONDS`. `-g` applies to both device types; `-g 0` submits a CPU task.
 
@@ -76,7 +77,10 @@ sudo xlurm start --backend ascend            # Manage only Ascend
 sudo xlurm start --backend none              # CPU mode; no device driver required
 sudo xlurm daemon --backend auto --max-running 32  # Run in the foreground
 sudo xlurm stop                              # Stop scheduling; already-started tasks continue
+sudo xlurm clean                             # Remove logs after all tasks have finished
 ```
+
+`xlurm clean` is an offline administrator action. It refuses to run if the scheduler is active or if persisted state contains a `RUNNING` task. After both checks pass, it removes every task `.log` file and `daemon.log` while preserving queued tasks, task history, results, and other spool files. If a worker finishes while the scheduler is stopped, restart the scheduler once so it can collect the result before stopping it and running `clean`. New tasks and a subsequent background start create new log files.
 
 `start` does not modify an already-running scheduler; stop it first to change the backend or concurrency limit. A subsequent start takes over running tasks, reads results completed while it was offline, and continues queued tasks. After a machine reboot or unexpected worker disappearance, running tasks without results are marked `FAILED` and are not rerun automatically.
 

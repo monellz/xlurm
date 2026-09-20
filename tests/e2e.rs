@@ -417,6 +417,51 @@ fn background_start_and_single_daemon_lock() {
 }
 
 #[test]
+fn clean_requires_an_idle_stopped_scheduler_and_removes_only_logs() {
+    let mut h = Harness::new("none", 1);
+    h.start();
+    let job = h.submit(&[
+        "-g",
+        "0",
+        "--wrap",
+        "echo existing-output; while [ ! -f release ]; do sleep 0.05; done",
+    ]);
+    h.wait_state(job, "RUNNING");
+    fs::write(h.dir.path().join("state/daemon.log"), "diagnostic\n").unwrap();
+
+    let online = h.command("xlurm").arg("clean").output().unwrap();
+    assert!(!online.status.success());
+    assert!(String::from_utf8_lossy(&online.stderr).contains("xlurm is running"));
+
+    h.run("xlurm", &["stop"]);
+    h.daemon.as_mut().unwrap().wait().unwrap();
+    h.daemon = None;
+    let active = h.command("xlurm").arg("clean").output().unwrap();
+    assert!(!active.status.success());
+    assert!(
+        String::from_utf8_lossy(&active.stderr)
+            .contains("cannot clean logs while jobs are running: 1")
+    );
+    assert!(h.dir.path().join("state/daemon.log").exists());
+    assert!(h.dir.path().join("state/jobs/1.log").exists());
+
+    fs::write(h.dir.path().join("release"), "").unwrap();
+    h.start();
+    h.wait_state(job, "COMPLETED");
+    h.run("xlurm", &["stop"]);
+    h.daemon.as_mut().unwrap().wait().unwrap();
+    h.daemon = None;
+
+    let output = String::from_utf8(h.run("xlurm", &["clean"]).stdout).unwrap();
+    assert!(output.contains("Removed 1 job log(s) and daemon.log."));
+    assert!(!h.dir.path().join("state/daemon.log").exists());
+    assert!(!h.dir.path().join("state/jobs/1.log").exists());
+    let state: Value =
+        serde_json::from_slice(&fs::read(h.dir.path().join("state/state.json")).unwrap()).unwrap();
+    assert_eq!(state["jobs"][0]["state"], "COMPLETED");
+}
+
+#[test]
 fn restart_cleans_expired_history_without_disrupting_live_jobs() {
     let mut h = Harness::new("none", 1);
     h.start();
