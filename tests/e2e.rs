@@ -32,6 +32,7 @@ impl Harness {
             "xrun" => env!("CARGO_BIN_EXE_xrun"),
             "xbatch" => env!("CARGO_BIN_EXE_xbatch"),
             "xqueue" => env!("CARGO_BIN_EXE_xqueue"),
+            "xcancel" => env!("CARGO_BIN_EXE_xcancel"),
             "xinfo" => env!("CARGO_BIN_EXE_xinfo"),
             _ => panic!("unknown binary"),
         };
@@ -239,7 +240,7 @@ fn batch_snapshot_pending_cancel_and_restart_recovery() {
     fs::write(h.dir.path().join("script with spaces.sh"), "echo modified").unwrap();
     assert_eq!(h.job(second)["state"], "PENDING");
     let cancelled = h.submit(&["-g", "0", "--wrap", "touch must-not-run"]);
-    h.run("xqueue", &["--cancel", &cancelled.to_string()]);
+    h.run("xcancel", &[&cancelled.to_string()]);
     h.wait_state(cancelled, "CANCELLED");
 
     let mut daemon = h.daemon.take().unwrap();

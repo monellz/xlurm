@@ -41,6 +41,9 @@ enum Action {
     /// Show jobs, inspect a job, or cancel a job.
     #[command(alias = "xqueue")]
     Queue(QueueArgs),
+    /// Cancel a pending or running job (including its process group).
+    #[command(alias = "xcancel")]
+    Cancel(CancelArgs),
     /// Show device availability.
     #[command(alias = "xinfo")]
     Info(InfoArgs),
@@ -112,6 +115,12 @@ struct QueueArgs {
 }
 
 #[derive(Args)]
+struct CancelArgs {
+    #[arg(value_name = "JOB_ID")]
+    id: u64,
+}
+
+#[derive(Args)]
 struct InfoArgs {
     #[arg(long)]
     json: bool,
@@ -138,6 +147,7 @@ pub fn run(wrapper: Option<&str>) -> Result<i32> {
             "run" => "xrun",
             "batch" => "xbatch",
             "queue" => "xqueue",
+            "cancel" => "xcancel",
             "info" => "xinfo",
             _ => bail!("unknown command wrapper"),
         };
@@ -153,6 +163,7 @@ pub fn run(wrapper: Option<&str>) -> Result<i32> {
             "run" => Action::Run(RunArgs::from_arg_matches(&matches)?),
             "batch" => Action::Batch(BatchArgs::from_arg_matches(&matches)?),
             "queue" => Action::Queue(QueueArgs::from_arg_matches(&matches)?),
+            "cancel" => Action::Cancel(CancelArgs::from_arg_matches(&matches)?),
             "info" => Action::Info(InfoArgs::from_arg_matches(&matches)?),
             _ => unreachable!(),
         };
@@ -195,6 +206,7 @@ pub fn run(wrapper: Option<&str>) -> Result<i32> {
             println!("{}", job.id);
         }
         Action::Queue(args) => queue(&paths, args)?,
+        Action::Cancel(args) => cancel(&paths, args.id)?,
         Action::Info(args) => {
             let Response::Info(devices) = request(&paths, &Request::Info)? else {
                 bail!("unexpected response");
@@ -309,6 +321,9 @@ fn start(paths: &Paths, args: DaemonArgs) -> Result<()> {
 fn follow(paths: &Paths, id: u64) -> Result<i32> {
     let mut offset = 0;
     let mut cancelled = false;
+    let waiting_since = Instant::now();
+    let mut waiting_reported = false;
+    let mut started_reported = false;
     loop {
         if crate::interrupted() && !cancelled {
             request(paths, &Request::Cancel(id))?;
@@ -317,6 +332,19 @@ fn follow(paths: &Paths, id: u64) -> Result<i32> {
         let Response::Job(job) = request(paths, &Request::Get(id))? else {
             bail!("unexpected response");
         };
+        // Every submission starts pending; allow the scheduler to run first.
+        if job.state == State::Pending
+            && !waiting_reported
+            && waiting_since.elapsed() >= Duration::from_secs(1)
+        {
+            eprintln!("[xlurm] {} Job {id}: Waiting for resources...", timestamp());
+            waiting_reported = true;
+        }
+        // Fast jobs can finish between polls, so check whether they ever started.
+        if !started_reported && job.started_at.is_some() {
+            eprintln!("[xlurm] {} Job {id}: Task started.", timestamp());
+            started_reported = true;
+        }
         let mut drained = false;
         for _ in 0..16 {
             if !print_log_chunk(paths, id, &mut offset)? {
@@ -334,6 +362,23 @@ fn follow(paths: &Paths, id: u64) -> Result<i32> {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+fn timestamp() -> String {
+    let seconds = now() as libc::time_t;
+    let mut time: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::gmtime_r(&seconds, &mut time) }.is_null() {
+        return format!("{seconds} Unix");
+    }
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
+        time.tm_year + 1900,
+        time.tm_mon + 1,
+        time.tm_mday,
+        time.tm_hour,
+        time.tm_min,
+        time.tm_sec,
+    )
 }
 
 fn print_log_chunk(paths: &Paths, id: u64, offset: &mut u64) -> Result<bool> {
@@ -357,11 +402,15 @@ fn print_log_chunk(paths: &Paths, id: u64, offset: &mut u64) -> Result<bool> {
     Ok(!bytes.is_empty())
 }
 
+fn cancel(paths: &Paths, id: u64) -> Result<()> {
+    request(paths, &Request::Cancel(id))?;
+    println!("Cancellation requested for job {id}");
+    Ok(())
+}
+
 fn queue(paths: &Paths, args: QueueArgs) -> Result<()> {
     if let Some(id) = args.cancel {
-        request(paths, &Request::Cancel(id))?;
-        println!("Cancellation requested for job {id}");
-        return Ok(());
+        return cancel(paths, id);
     }
     if let Some(id) = args.id {
         let Response::Job(job) = request(paths, &Request::Get(id))? else {

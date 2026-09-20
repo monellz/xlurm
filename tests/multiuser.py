@@ -26,7 +26,7 @@ def main():
         root.chmod(0o755)
         binaries = root / "bin"
         binaries.mkdir(mode=0o755)
-        for name in ("xlurm", "xrun", "xbatch", "xqueue", "xinfo"):
+        for name in ("xlurm", "xrun", "xbatch", "xqueue", "xcancel", "xinfo"):
             shutil.copyfile(source / name, binaries / name)
             (binaries / name).chmod(0o755)
         workdirs = {}
@@ -98,6 +98,8 @@ def main():
             for args in ([str(first), "--json"], [str(first), "--log"], ["--cancel", str(first)]):
                 denied = command("xqueue", args, bob, check=False)
                 assert denied.returncode != 0 and "permission denied" in denied.stderr, denied
+            denied = command("xcancel", [str(first)], bob, check=False)
+            assert denied.returncode != 0 and "permission denied" in denied.stderr, denied
             assert command("xlurm", ["stop"], bob, check=False).returncode != 0
             command("xinfo", [], alice)  # A denied stop must not stop the daemon.
             # Private state is inaccessible even outside the CLI.
@@ -109,7 +111,7 @@ def main():
                 result = subprocess.run(["/bin/cat", str(path)], preexec_fn=demote_bob,
                     capture_output=True, timeout=5)
                 assert result.returncode != 0
-            command("xqueue", ["--cancel", str(first)], alice)
+            command("xcancel", [str(first)], alice)
             wait_job(first, "CANCELLED")
             wait_job(second, "COMPLETED")
             assert command("xqueue", [str(second), "--log"], bob).stdout == "bob-ran\n"
@@ -117,7 +119,7 @@ def main():
             third = submit(bob, "sleep 60")
             active.append(third)
             wait_job(third, "RUNNING")
-            command("xqueue", ["--cancel", str(third)])
+            command("xcancel", [str(third)])
             wait_job(third, "CANCELLED")
             # A raw client cannot inject a root owner into a submission.
             message = {"Submit": {"command": ["id"], "cwd": "/", "env": {}, "name": "forged",

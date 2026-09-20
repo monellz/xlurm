@@ -8,14 +8,14 @@
 cargo install --path . --locked
 ```
 
-默认安装 `xlurm`、`xrun`、`xbatch`、`xqueue`、`xinfo` 到 `~/.cargo/bin`（需在 `PATH` 中），无需逐个指定 `--bin` 或加 `--bins`。`--locked` 用于按仓库的锁文件安装依赖，也可以省略；安装默认使用 release 构建。
+默认安装 `xlurm`、`xrun`、`xbatch`、`xqueue`、`xcancel`、`xinfo` 到 `~/.cargo/bin`（需在 `PATH` 中），无需逐个指定 `--bin` 或加 `--bins`。`--locked` 用于按仓库的锁文件安装依赖，也可以省略；安装默认使用 release 构建。
 
 多人共用的服务器由管理员安装到系统目录并启动共享调度器：
 
 ```bash
 # 管理员安装一次，二进制由 root 持有，所有用户共用
 cargo build --release --locked
-sudo install -o root -g root -m 0755 target/release/{xlurm,xrun,xbatch,xqueue,xinfo} /usr/local/bin/
+sudo install -o root -g root -m 0755 target/release/{xlurm,xrun,xbatch,xqueue,xcancel,xinfo} /usr/local/bin/
 sudo xlurm start
 
 # 以下由普通用户执行，不使用 sudo
@@ -23,16 +23,17 @@ xinfo                                    # 看设备
 xrun -g 1 python train.py                 # 排队、运行、输出日志，返回任务退出码
 xbatch -g 2 train.sh                     # 后台提交 bash 脚本，返回 job ID
 xqueue                                   # 看排队和运行中的任务
-xqueue --cancel 3                        # 取消任务及其进程组
+xcancel 3                                # 取消任务及其进程组
 ```
 
-## 四个命令
+## 五个命令
 
 | 命令 | 用途 |
 | --- | --- |
 | `xrun [选项] COMMAND [ARGS...]` | 前台等待任务，转发 stdout/stderr，Ctrl-C 取消任务 |
 | `xbatch [选项] SCRIPT [ARGS...]` | 保存脚本快照后提交，不必等资源空闲 |
 | `xqueue [JOB_ID]` | 查看全机活动队列；传 ID 查看自己任务的详细结果 |
+| `xcancel JOB_ID` | 取消任务及其进程组，等价于 `xqueue --cancel JOB_ID` |
 | `xinfo` | 显示设备、外部占用、分配情况 |
 
 任务选项只有四个：`-g/--gpus N`（也可写 `--devices`，默认 1）、`--device nvidia|ascend`、`-n/--name NAME`、`-t/--time-limit SECONDS`。`-g` 对两类卡均适用；`-g 0` 提交 CPU 任务。
@@ -54,7 +55,12 @@ xinfo --json
 
 参数直接传给进程，不拼接成 shell 命令；需要管道、重定向、变量展开时显式用 `bash -c` 或 `xbatch --wrap`。批处理脚本统一由 bash 执行，参数原样传入；不解析 `#SBATCH` 等脚本指令。任务保留提交时的工作目录和环境，因此先激活 conda/venv 再提交即可。
 
-`xrun`（或 `xlurm run`）默认只输出任务日志，不打印 `Job N` 等提交提示；无法启动任务等执行错误仍会报到 stderr。`xbatch` 后台提交后只返回任务 ID，供后续查询或取消。
+`xrun`（或 `xlurm run`）向 stderr 打印带 UTC 时间戳和 Job ID 的状态提示。排队超过 1 秒时打印一次 `Waiting for resources...`；开始运行时打印一次 `Task started.`，立即执行的任务也会打印启动提示。任务日志照常输出，无法启动任务等执行错误仍会报到 stderr。`xbatch` 后台提交后只返回任务 ID，供后续查询或取消。
+
+```text
+[xlurm] 2026-09-20 12:34:56 UTC Job 3: Waiting for resources...
+[xlurm] 2026-09-20 12:35:10 UTC Job 3: Task started.
+```
 
 `xrun` 是前台日志跟随，不提供交互终端，任务 stdin 为 `/dev/null`；stdout/stderr 合并保存。Python 如需立即输出日志，可使用 `python -u`。
 
@@ -90,7 +96,7 @@ $XLURM_HOME/
 ## 执行与资源
 
 ```text
-xrun / xbatch / xqueue / xinfo
+xrun / xbatch / xqueue / xcancel / xinfo
                │ Unix socket
        SO_PEERCRED 鉴权 → 单线程 Scheduler
                │ Executor: start / poll / cancel
