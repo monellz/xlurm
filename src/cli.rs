@@ -172,7 +172,6 @@ pub fn run(wrapper: Option<&str>) -> Result<i32> {
             crate::install_signals()?;
             let spec = submission(args.resources, args.command, None)?;
             let job = submit(&paths, spec)?;
-            eprintln!("Job {}", job.id);
             return follow(&paths, job.id);
         }
         Action::Batch(args) => {
@@ -329,7 +328,7 @@ fn follow(paths: &Paths, id: u64) -> Result<i32> {
             && drained
         {
             if let Some(error) = &result.error {
-                eprintln!("Job {id}: {error}");
+                eprintln!("xlurm: {error}");
             }
             return Ok(result.exit_code);
         }

@@ -2,6 +2,16 @@
 
 极简的 **Linux 单机、多用户** GPU / 华为 Ascend 调度器。Rust 编写，直接用进程 Executor 执行任务，不依赖 tmux。一个共享调度器统一分配整机设备，每个任务以提交用户自己的身份执行。
 
+在仓库目录中，一条命令即可安装全部命令：
+
+```bash
+cargo install --path . --locked
+```
+
+默认安装 `xlurm`、`xrun`、`xbatch`、`xqueue`、`xinfo` 到 `~/.cargo/bin`（需在 `PATH` 中），无需逐个指定 `--bin` 或加 `--bins`。`--locked` 用于按仓库的锁文件安装依赖，也可以省略；安装默认使用 release 构建。
+
+多人共用的服务器由管理员安装到系统目录并启动共享调度器：
+
 ```bash
 # 管理员安装一次，二进制由 root 持有，所有用户共用
 cargo build --release --locked
@@ -43,6 +53,8 @@ xinfo --json
 `xrun` 的调度选项写在命令名前；从命令名开始，后续参数均传给任务程序，包括 `--help`、`--gpus` 等同名选项。分隔符 `--` 可省略，原来的 `xrun -g 1 -- python train.py` 写法也兼容。
 
 参数直接传给进程，不拼接成 shell 命令；需要管道、重定向、变量展开时显式用 `bash -c` 或 `xbatch --wrap`。批处理脚本统一由 bash 执行，参数原样传入；不解析 `#SBATCH` 等脚本指令。任务保留提交时的工作目录和环境，因此先激活 conda/venv 再提交即可。
+
+`xrun`（或 `xlurm run`）默认只输出任务日志，不打印 `Job N` 等提交提示；无法启动任务等执行错误仍会报到 stderr。`xbatch` 后台提交后只返回任务 ID，供后续查询或取消。
 
 `xrun` 是前台日志跟随，不提供交互终端，任务 stdin 为 `/dev/null`；stdout/stderr 合并保存。Python 如需立即输出日志，可使用 `python -u`。
 
