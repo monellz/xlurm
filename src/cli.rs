@@ -456,10 +456,15 @@ fn follow(paths: &Paths, id: u64) -> Result<i32> {
 }
 
 fn timestamp() -> String {
-    format_timestamp(now(), 0, "UTC")
+    format_timestamp(now(), 0, "UTC", true)
 }
 
-fn format_timestamp(timestamp: u64, offset_seconds: u64, timezone: &str) -> String {
+fn format_timestamp(
+    timestamp: u64,
+    offset_seconds: u64,
+    timezone: &str,
+    show_year: bool,
+) -> String {
     let seconds = timestamp.saturating_add(offset_seconds) as libc::time_t;
     let mut time: libc::tm = unsafe { std::mem::zeroed() };
     if unsafe { libc::gmtime_r(&seconds, &mut time) }.is_null() {
@@ -470,14 +475,19 @@ fn format_timestamp(timestamp: u64, offset_seconds: u64, timezone: &str) -> Stri
     } else {
         format!(" {timezone}")
     };
+    let date = if show_year {
+        format!(
+            "{:04}-{:02}-{:02}",
+            time.tm_year + 1900,
+            time.tm_mon + 1,
+            time.tm_mday
+        )
+    } else {
+        format!("{:02}-{:02}", time.tm_mon + 1, time.tm_mday)
+    };
     format!(
-        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}{timezone}",
-        time.tm_year + 1900,
-        time.tm_mon + 1,
-        time.tm_mday,
-        time.tm_hour,
-        time.tm_min,
-        time.tm_sec,
+        "{date} {:02}:{:02}:{:02}{timezone}",
+        time.tm_hour, time.tm_min, time.tm_sec
     )
 }
 
@@ -560,12 +570,12 @@ fn queue(paths: &Paths, args: QueueArgs) -> Result<()> {
     if args.json {
         println!("{}", serde_json::to_string_pretty(&jobs)?);
     } else {
-        print!("{}", format_queue_table(&jobs, now()));
+        print!("{}", format_queue_table(&jobs, now(), args.all));
     }
     Ok(())
 }
 
-fn format_queue_table(jobs: &[JobSummary], timestamp: u64) -> String {
+fn format_queue_table(jobs: &[JobSummary], timestamp: u64, show_year: bool) -> String {
     let headers = [
         "JOB",
         "USER",
@@ -588,7 +598,7 @@ fn format_queue_table(jobs: &[JobSummary], timestamp: u64) -> String {
                 device_names(&job.devices),
                 job.started_at.map_or_else(
                     || "-".into(),
-                    |started_at| format_timestamp(started_at, 8 * 60 * 60, ""),
+                    |started_at| format_timestamp(started_at, 8 * 60 * 60, "", show_year),
                 ),
                 format_duration(wait_time),
                 run_time.map_or_else(|| "-".into(), format_duration),
@@ -631,7 +641,7 @@ fn format_queue_table(jobs: &[JobSummary], timestamp: u64) -> String {
 fn format_started_at(started_at: Option<u64>) -> String {
     started_at.map_or_else(
         || "-".into(),
-        |started_at| format_timestamp(started_at, 8 * 60 * 60, "UTC+8"),
+        |started_at| format_timestamp(started_at, 8 * 60 * 60, "UTC+8", true),
     )
 }
 
@@ -771,14 +781,23 @@ mod tests {
             })
             .collect();
 
-        let table = format_queue_table(&[short, long], 0);
+        let table = format_queue_table(&[short.clone(), long.clone()], 0, false);
         let lines: Vec<_> = table.lines().collect();
         assert!(lines[0].contains("DEVICES"));
         assert!(!lines[0].contains("COUNT"));
         assert!(lines[2].contains("ascend:[0,1]"));
         let started_column = lines[0].find("STARTED").unwrap();
-        assert_eq!(lines[1].find("1970-01-01").unwrap(), started_column);
-        assert_eq!(lines[2].find("1970-01-01").unwrap(), started_column);
+        assert_eq!(lines[1].find("01-01 08:00:00").unwrap(), started_column);
+        assert_eq!(lines[2].find("01-01 08:00:00").unwrap(), started_column);
+        assert!(!table.contains("1970-"));
+
+        let all_table = format_queue_table(&[short, long], 0, true);
+        assert!(
+            all_table
+                .lines()
+                .skip(1)
+                .all(|line| line.contains("1970-01-01 08:00:00"))
+        );
     }
 
     #[test]

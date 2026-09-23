@@ -275,6 +275,18 @@ fn batch_snapshot_pending_cancel_and_restart_recovery() {
     assert_eq!(h.job(second)["state"], "PENDING");
     let queue = String::from_utf8(h.run("xqueue", &[]).stdout).unwrap();
     assert!(queue.contains("STARTED (UTC+8)"));
+    let running_detail = String::from_utf8(h.run("xqueue", &[&first.to_string()]).stdout).unwrap();
+    let started_at = running_detail
+        .lines()
+        .find_map(|line| line.strip_prefix("Started at: "))
+        .unwrap()
+        .strip_suffix(" UTC+8")
+        .unwrap();
+    let (_, short_started_at) = started_at.split_once('-').unwrap();
+    assert!(queue.contains(short_started_at));
+    assert!(!queue.contains(started_at));
+    let all_queue = String::from_utf8(h.run("xqueue", &["--all"]).stdout).unwrap();
+    assert!(all_queue.contains(started_at));
     assert!(
         queue
             .lines()
