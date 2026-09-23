@@ -93,8 +93,10 @@ def main():
             active.append(second)
             assert wait_job(second, "PENDING")["owner"]["uid"] == bob.pw_uid
             summary = json.loads(command("xqueue", ["--json"], bob).stdout)
-            assert {row["owner"]["uid"] for row in summary} == {alice.pw_uid, bob.pw_uid}
+            assert {row["owner"]["uid"] for row in summary} == {bob.pw_uid}
             assert all("spec" not in row and "env" not in row for row in summary)
+            root_summary = json.loads(command("xqueue", ["--json"]).stdout)
+            assert {row["owner"]["uid"] for row in root_summary} == {alice.pw_uid, bob.pw_uid}
             for args in ([str(first), "--json"], [str(first), "--log"], ["--cancel", str(first)]):
                 denied = command("xqueue", args, bob, check=False)
                 assert denied.returncode != 0 and "permission denied" in denied.stderr, denied
@@ -138,7 +140,7 @@ def main():
             assert bob_log.exists()
             command("xlurm", ["clean"])
             assert not bob_log.exists()
-            print("PASS: real UID/GID/groups, shared queue, private spool/logs, owner cancellation, admin control and cleanup")
+            print("PASS: real UID/GID/groups, private queues/spool/logs, owner cancellation, admin control and cleanup")
         finally:
             for job_id in active:
                 command("xqueue", ["--cancel", str(job_id)], check=False)

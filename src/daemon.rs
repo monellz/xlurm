@@ -154,7 +154,13 @@ fn handle(
                 .map(|job| Response::Job(Box::new(job)))
         }
         Request::Queue => Ok(Response::Queue(
-            scheduler.store.jobs.iter().map(JobSummary::from).collect(),
+            scheduler
+                .store
+                .jobs
+                .iter()
+                .filter(|job| uid == 0 || job.owner.uid == uid)
+                .map(JobSummary::from)
+                .collect(),
         )),
         Request::Get(id) => {
             let job = scheduler.get(id)?;
@@ -232,7 +238,13 @@ mod tests {
             time_limit: None,
             script: None,
         };
-        let id = scheduler.submit(spec, owner.clone()).unwrap().id;
+        let id = scheduler.submit(spec.clone(), owner.clone()).unwrap().id;
+        let other_owner = Owner {
+            uid: 23457,
+            gid: 23457,
+            name: "bob".into(),
+        };
+        let other_id = scheduler.submit(spec, other_owner.clone()).unwrap().id;
         fs::write(paths.job(id, "log"), b"private-output\x00\xff").unwrap();
 
         for request in [
@@ -244,10 +256,25 @@ mod tests {
             assert!(handle(&mut scheduler, &paths, 23457, 23457, request).is_err());
         }
         assert_eq!(scheduler.get(id).unwrap().state, State::Pending);
-        let queue = handle(&mut scheduler, &paths, 23457, 23457, Request::Queue).unwrap();
-        let json = serde_json::to_string(&queue).unwrap();
-        assert!(json.contains("alice") && json.contains("public-name"));
+        let queue = handle(
+            &mut scheduler,
+            &paths,
+            other_owner.uid,
+            other_owner.gid,
+            Request::Queue,
+        )
+        .unwrap();
+        let Response::Queue(jobs) = queue else {
+            panic!("unexpected response");
+        };
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].id, other_id);
+        let json = serde_json::to_string(&jobs).unwrap();
+        assert!(json.contains("bob") && json.contains("public-name"));
+        assert!(!json.contains("alice"));
         assert!(!json.contains("private-command") && !json.contains("private-token"));
+        let root_queue = handle(&mut scheduler, &paths, 0, 0, Request::Queue).unwrap();
+        assert!(matches!(root_queue, Response::Queue(jobs) if jobs.len() == 2));
         assert!(
             handle(
                 &mut scheduler,

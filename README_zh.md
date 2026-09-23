@@ -32,7 +32,7 @@ xcancel 3                                # 取消任务及其进程组
 | --- | --- |
 | `xrun [选项] COMMAND [ARGS...]` | 前台等待任务，转发 stdout/stderr，Ctrl-C 取消任务 |
 | `xbatch [选项] SCRIPT [ARGS...]` | 保存脚本快照后提交，不必等资源空闲 |
-| `xqueue [JOB_ID]` | 查看全机活动队列及等待/执行时间；传 ID 查看自己任务的详细结果 |
+| `xqueue [JOB_ID]` | 查看自己最新 100 条活动任务及等待/执行时间；传 ID 查看自己任务的详细结果 |
 | `xcancel JOB_ID` | 取消任务及其进程组，等价于 `xqueue --cancel JOB_ID` |
 | `xinfo` | 显示设备、外部占用、分配情况 |
 | `sudo xlurm clean` | 调度器已停止且没有运行中任务时删除全部日志 |
@@ -52,7 +52,7 @@ xqueue --all --json
 xinfo --json
 ```
 
-`xqueue` 的时长格式为 `HH:MM:SS`，超过 24 小时后为 `D-HH:MM:SS`。排队中任务的等待时间、运行中任务的执行时间会持续增加；未启动便取消的任务以 `-` 显示执行时间。
+`xqueue` 最多显示符合条件的最新 100 条任务，使用 `--all` 时也一样；root 可查看所有用户的任务。时长格式为 `HH:MM:SS`，超过 24 小时后为 `D-HH:MM:SS`。排队中任务的等待时间、运行中任务的执行时间会持续增加；未启动便取消的任务以 `-` 显示执行时间。
 
 `xrun` 的调度选项写在命令名前；从命令名开始，后续参数均传给任务程序，包括 `--help`、`--gpus` 等同名选项。分隔符 `--` 可省略，原来的 `xrun -g 1 -- python train.py` 写法也兼容。
 
@@ -124,7 +124,7 @@ xrun / xbatch / xqueue / xcancel / xinfo
 
 | 操作 | 普通用户 | root 管理员 |
 | --- | --- | --- |
-| `xinfo`、队列概要 | 可看全机；队列含 USER 列 | 可看全机 |
+| `xinfo`、队列概要 | 设备信息可看全机；队列仅含自己的任务 | 可看全机 |
 | 提交任务 | 以自己的 UID/GID 执行 | 以 root 执行 |
 | 任务详情、命令、环境、日志 | 仅自己的任务 | 所有任务 |
 | 取消任务 | 仅自己的任务 | 所有任务 |
@@ -132,7 +132,7 @@ xrun / xbatch / xqueue / xcancel / xinfo
 
 身份来自内核 `SO_PEERCRED`，客户端无法通过 JSON 或 `USER` 环境变量指定任务属主。执行前重新解析本机账户及附加组，依次设置 supplementary groups、real/effective/saved GID 和 UID，再进入用户工作目录并执行命令。用户拥有的文件按该用户权限读写；Ascend/NVIDIA 驱动所需的用户组权限也得以保留。
 
-任务设置 `no_new_privs`，因此任务内不能依赖 sudo/setuid 程序提权。队列公开的只是任务名、属主、资源和状态，不包含命令、脚本或环境。调度仍是简单的按提交顺序尝试分配，不增加用户配额、优先级或计费系统。
+任务设置 `no_new_privs`，因此任务内不能依赖 sudo/setuid 程序提权。队列概要只含任务名、属主、资源和状态，daemon 还会将非 root 调用者限制为只能查看自己的任务；命令、脚本和环境绝不会出现在概要中。调度仍是简单的按提交顺序尝试分配，不增加用户配额、优先级或计费系统。
 
 这里提供的是多用户身份与控制权限；GPU/NPU 使用范围通过可见设备环境变量约定，尚未通过 cgroup 强制限制设备节点访问。绕过调度器直接用卡的程序仍可能竞争设备。不支持 MIG、显存切分或故意脱离进程组的后台服务。CPU 任务会将两类设备可见变量设为 `-1`。
 
@@ -152,7 +152,7 @@ sudo python3 tests/multiuser.py
 
 端到端测试通过模拟驱动覆盖 NVIDIA 和 Ascend，验证独占分配、外部占用/查询失败、前台退出码、脚本快照、取消、超时和调度器崩溃接管；权限测试覆盖属主伪造、跨用户查询/读日志/取消、管理员权限和队列隐私。普通 `cargo test` 不需要 root。
 
-`tests/multiuser.py` 使用现有 `nobody`、`daemon` 两个账户，验证真实 UID/GID/附加组切换、输出文件属主、共享队列及越权拒绝；使用临时目录和 CPU 任务，不修改账户配置。开发时可通过 `XLURM_HOME=/tmp/my-xlurm xlurm daemon --backend none` 启动仅当前账户可访问的非 root 测试实例。
+`tests/multiuser.py` 使用现有 `nobody`、`daemon` 两个账户，验证真实 UID/GID/附加组切换、输出文件属主、私有队列及越权拒绝；使用临时目录和 CPU 任务，不修改账户配置。开发时可通过 `XLURM_HOME=/tmp/my-xlurm xlurm daemon --backend none` 启动仅当前账户可访问的非 root 测试实例。
 
 接口语义参考：[CUDA 可见设备](https://docs.nvidia.com/deploy/topics/topic_5_2_1.html)、[Ascend 可见设备](https://www.hiascend.com/document/detail/en/canncommercial/850/maintenref/envvar/envref_07_0028.html)、[Linux Unix socket 凭据](https://man7.org/linux/man-pages/man7/unix.7.html)。
 

@@ -12,6 +12,8 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+const DEFAULT_QUEUE_LIMIT: usize = 100;
+
 #[derive(Parser)]
 #[command(
     name = "xlurm",
@@ -522,10 +524,7 @@ fn queue(paths: &Paths, args: QueueArgs) -> Result<()> {
     let Response::Queue(jobs) = request(paths, &Request::Queue)? else {
         bail!("unexpected response");
     };
-    let jobs: Vec<_> = jobs
-        .into_iter()
-        .filter(|j| args.all || !j.state.terminal())
-        .collect();
+    let jobs = visible_queue_jobs(jobs, args.all);
     if args.json {
         println!("{}", serde_json::to_string_pretty(&jobs)?);
     } else {
@@ -550,6 +549,17 @@ fn queue(paths: &Paths, args: QueueArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn visible_queue_jobs(jobs: Vec<JobSummary>, all: bool) -> Vec<JobSummary> {
+    let mut jobs: Vec<_> = jobs
+        .into_iter()
+        .rev()
+        .filter(|job| all || !job.state.terminal())
+        .take(DEFAULT_QUEUE_LIMIT)
+        .collect();
+    jobs.reverse();
+    jobs
 }
 
 fn job_times(
@@ -598,7 +608,26 @@ fn device_names(devices: &[Device]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_duration, job_times};
+    use super::{format_duration, job_times, visible_queue_jobs};
+    use crate::model::{JobSummary, Owner, State};
+
+    fn summary(id: u64, state: State) -> JobSummary {
+        JobSummary {
+            id,
+            owner: Owner {
+                uid: 1,
+                gid: 1,
+                name: "user".into(),
+            },
+            name: format!("job-{id}"),
+            state,
+            count: 0,
+            devices: vec![],
+            submitted_at: id,
+            started_at: None,
+            finished_at: None,
+        }
+    }
 
     #[test]
     fn job_times_follow_the_job_lifecycle() {
@@ -613,5 +642,37 @@ mod tests {
         assert_eq!(format_duration(0), "00:00:00");
         assert_eq!(format_duration(3_661), "01:01:01");
         assert_eq!(format_duration(183_845), "2-03:04:05");
+    }
+
+    #[test]
+    fn queue_keeps_the_latest_hundred_matching_jobs_in_display_order() {
+        let jobs = (1..=110).map(|id| summary(id, State::Pending)).collect();
+        let visible = visible_queue_jobs(jobs, false);
+        assert_eq!(visible.len(), 100);
+        assert_eq!(visible.first().unwrap().id, 11);
+        assert_eq!(visible.last().unwrap().id, 110);
+
+        let jobs = (1..=202)
+            .map(|id| {
+                summary(
+                    id,
+                    if id % 2 == 0 {
+                        State::Completed
+                    } else {
+                        State::Running
+                    },
+                )
+            })
+            .collect();
+        let active = visible_queue_jobs(jobs, false);
+        assert_eq!(active.len(), 100);
+        assert_eq!(active.first().unwrap().id, 3);
+        assert_eq!(active.last().unwrap().id, 201);
+
+        let history = (1..=110).map(|id| summary(id, State::Completed)).collect();
+        let visible = visible_queue_jobs(history, true);
+        assert_eq!(visible.len(), 100);
+        assert_eq!(visible.first().unwrap().id, 11);
+        assert_eq!(visible.last().unwrap().id, 110);
     }
 }

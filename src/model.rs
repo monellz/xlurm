@@ -85,7 +85,7 @@ pub struct Job {
     pub result: Option<Outcome>,
 }
 
-/// Public queue metadata deliberately excludes commands, scripts and environment.
+/// Queue metadata deliberately excludes commands, scripts and environment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobSummary {
     pub id: u64,
