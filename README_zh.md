@@ -25,7 +25,7 @@ xqueue                                   # 看排队和运行中的任务
 xcancel 3                                # 取消任务及其进程组
 ```
 
-`install.sh` 需要 Cargo 和 `sudo`。脚本使用 `--release --locked` 构建，将 6 个二进制安装为 root 所有、权限 0755；它不会启动或重启调度器。
+`install.sh` 需要 Cargo 和 `sudo`。脚本使用 `--release --locked` 构建，将 6 个二进制安装为 root 所有、权限 0755；它不会启动或重启调度器。已在运行的调度器及其后续启动的 worker 会继续使用旧版可执行文件，直到调度器重启。
 
 ## 命令
 

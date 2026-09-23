@@ -27,7 +27,7 @@ xqueue                                   # Show queued and running tasks
 xcancel 3                                # Cancel a task and its process group
 ```
 
-`install.sh` requires Cargo and `sudo`. It builds with `--release --locked`, then installs all six binaries as root-owned files with mode 0755. It does not start or restart the scheduler.
+`install.sh` requires Cargo and `sudo`. It builds with `--release --locked`, then installs all six binaries as root-owned files with mode 0755. It does not start or restart the scheduler. An already-running daemon and the workers it launches continue using the previous executable until the daemon is restarted.
 
 ## Commands
 

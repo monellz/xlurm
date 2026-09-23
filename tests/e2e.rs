@@ -36,7 +36,11 @@ impl Harness {
             "xinfo" => env!("CARGO_BIN_EXE_xinfo"),
             _ => panic!("unknown binary"),
         };
-        let mut command = Command::new(path);
+        self.command_path(path)
+    }
+
+    fn command_path(&self, path: impl AsRef<Path>) -> Command {
+        let mut command = Command::new(path.as_ref());
         command
             .current_dir(self.dir.path())
             .env("XLURM_HOME", self.dir.path().join("state"))
@@ -60,13 +64,17 @@ impl Harness {
     }
 
     fn start(&mut self) {
+        self.start_with(env!("CARGO_BIN_EXE_xlurm"));
+    }
+
+    fn start_with(&mut self, executable: impl AsRef<Path>) {
         let log = fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(self.dir.path().join("daemon.log"))
             .unwrap();
         self.daemon = Some(
-            self.command("xlurm")
+            self.command_path(executable)
                 .args([
                     "daemon",
                     "--backend",
@@ -170,6 +178,32 @@ impl Drop for Harness {
             let _ = daemon.wait();
         }
     }
+}
+
+#[test]
+fn running_daemon_starts_workers_after_its_executable_is_replaced() {
+    let mut h = Harness::new("none", 1);
+    let daemon = h.dir.path().join("xlurm-daemon");
+    fs::copy(env!("CARGO_BIN_EXE_xlurm"), &daemon).unwrap();
+    h.start_with(&daemon);
+
+    // Reproduce an in-place package upgrade: /proc/<pid>/exe now names a
+    // deleted inode even though a new executable exists at the original path.
+    fs::remove_file(&daemon).unwrap();
+    fs::copy(env!("CARGO_BIN_EXE_xlurm"), &daemon).unwrap();
+
+    let output = h
+        .command("xrun")
+        .args(["-g", "0", "-t", "5", "/bin/true"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\nDaemon log:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        fs::read_to_string(h.dir.path().join("daemon.log")).unwrap_or_default()
+    );
+    assert_eq!(h.wait_state(1, "COMPLETED")["result"]["exit_code"], 0);
 }
 
 #[test]

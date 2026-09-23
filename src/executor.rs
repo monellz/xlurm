@@ -40,7 +40,10 @@ impl Executor for ProcessExecutor {
             .append(true)
             .open(self.paths.job(job.id, "log"))?;
         let fd = lock.as_raw_fd();
-        let mut command = Command::new(std::env::current_exe()?);
+        // Keep workers on the daemon's exact binary. current_exe() resolves
+        // this link and appends " (deleted)" after an in-place upgrade, which
+        // leaves subsequent worker spawns failing with ENOENT.
+        let mut command = Command::new("/proc/self/exe");
         command
             .arg("__worker")
             .arg(job.id.to_string())
