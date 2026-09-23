@@ -456,13 +456,22 @@ fn follow(paths: &Paths, id: u64) -> Result<i32> {
 }
 
 fn timestamp() -> String {
-    let seconds = now() as libc::time_t;
+    format_timestamp(now(), 0, "UTC")
+}
+
+fn format_timestamp(timestamp: u64, offset_seconds: u64, timezone: &str) -> String {
+    let seconds = timestamp.saturating_add(offset_seconds) as libc::time_t;
     let mut time: libc::tm = unsafe { std::mem::zeroed() };
     if unsafe { libc::gmtime_r(&seconds, &mut time) }.is_null() {
         return format!("{seconds} Unix");
     }
+    let timezone = if timezone.is_empty() {
+        String::new()
+    } else {
+        format!(" {timezone}")
+    };
     format!(
-        "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}{timezone}",
         time.tm_year + 1900,
         time.tm_mon + 1,
         time.tm_mday,
@@ -522,7 +531,7 @@ fn queue(paths: &Paths, args: QueueArgs) -> Result<()> {
                 now(),
             );
             println!(
-                "Job {}: {:?}\nName: {}\nUser: {} (UID {})\nDirectory: {}\nLog: xqueue {} --log\nDevices: {}\nWait time: {}\nRun time: {}",
+                "Job {}: {:?}\nName: {}\nUser: {} (UID {})\nDirectory: {}\nLog: xqueue {} --log\nDevices: {}\nStarted at: {}\nWait time: {}\nRun time: {}",
                 job.id,
                 job.state,
                 job.spec.name,
@@ -531,6 +540,7 @@ fn queue(paths: &Paths, args: QueueArgs) -> Result<()> {
                 job.spec.cwd.display(),
                 id,
                 device_names(&job.devices),
+                format_started_at(job.started_at),
                 format_duration(wait_time),
                 run_time.map_or_else(|| "-".into(), format_duration),
             );
@@ -550,27 +560,83 @@ fn queue(paths: &Paths, args: QueueArgs) -> Result<()> {
     if args.json {
         println!("{}", serde_json::to_string_pretty(&jobs)?);
     } else {
-        println!(
-            "JOB    USER         STATE       COUNT DEVICES          WAIT         RUN          NAME"
-        );
-        let timestamp = now();
-        for job in jobs {
-            let (wait_time, run_time) =
-                job_times(job.submitted_at, job.started_at, job.finished_at, timestamp);
-            println!(
-                "{:<6} {:<12} {:<11} {:<5} {:<16} {:<12} {:<12} {}",
-                job.id,
-                job.owner.name,
-                format!("{:?}", job.state).to_uppercase(),
-                job.count,
-                device_names(&job.devices),
-                format_duration(wait_time),
-                run_time.map_or_else(|| "-".into(), format_duration),
-                job.name.escape_debug()
-            );
-        }
+        print!("{}", format_queue_table(&jobs, now()));
     }
     Ok(())
+}
+
+fn format_queue_table(jobs: &[JobSummary], timestamp: u64) -> String {
+    let headers = [
+        "JOB",
+        "USER",
+        "STATE",
+        "COUNT",
+        "DEVICES",
+        "STARTED (UTC+8)",
+        "WAIT",
+        "RUN",
+        "NAME",
+    ];
+    let rows: Vec<[String; 9]> = jobs
+        .iter()
+        .map(|job| {
+            let (wait_time, run_time) =
+                job_times(job.submitted_at, job.started_at, job.finished_at, timestamp);
+            [
+                job.id.to_string(),
+                job.owner.name.clone(),
+                format!("{:?}", job.state).to_uppercase(),
+                job.count.to_string(),
+                device_names(&job.devices),
+                job.started_at.map_or_else(
+                    || "-".into(),
+                    |started_at| format_timestamp(started_at, 8 * 60 * 60, ""),
+                ),
+                format_duration(wait_time),
+                run_time.map_or_else(|| "-".into(), format_duration),
+                job.name.escape_debug().to_string(),
+            ]
+        })
+        .collect();
+    let widths: [usize; 8] = std::array::from_fn(|column| {
+        rows.iter()
+            .map(|row| row[column].chars().count())
+            .max()
+            .unwrap_or(0)
+            .max(headers[column].chars().count())
+    });
+    let mut output = String::new();
+    let header: [String; 9] = std::array::from_fn(|column| headers[column].into());
+    for row in std::iter::once(&header).chain(rows.iter()) {
+        output.push_str(&format!(
+            "{:<w0$} {:<w1$} {:<w2$} {:<w3$} {:<w4$} {:<w5$} {:<w6$} {:<w7$} {}\n",
+            row[0],
+            row[1],
+            row[2],
+            row[3],
+            row[4],
+            row[5],
+            row[6],
+            row[7],
+            row[8],
+            w0 = widths[0],
+            w1 = widths[1],
+            w2 = widths[2],
+            w3 = widths[3],
+            w4 = widths[4],
+            w5 = widths[5],
+            w6 = widths[6],
+            w7 = widths[7],
+        ));
+    }
+    output
+}
+
+fn format_started_at(started_at: Option<u64>) -> String {
+    started_at.map_or_else(
+        || "-".into(),
+        |started_at| format_timestamp(started_at, 8 * 60 * 60, "UTC+8"),
+    )
 }
 
 fn visible_queue_jobs(jobs: Vec<JobSummary>, all: bool) -> Vec<JobSummary> {
@@ -630,8 +696,10 @@ fn device_names(devices: &[Device]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_duration, job_times, visible_queue_jobs};
-    use crate::model::{JobSummary, Owner, State};
+    use super::{
+        format_duration, format_queue_table, format_started_at, job_times, visible_queue_jobs,
+    };
+    use crate::model::{Device, JobSummary, Kind, Owner, State};
 
     fn summary(id: u64, state: State) -> JobSummary {
         JobSummary {
@@ -664,6 +732,37 @@ mod tests {
         assert_eq!(format_duration(0), "00:00:00");
         assert_eq!(format_duration(3_661), "01:01:01");
         assert_eq!(format_duration(183_845), "2-03:04:05");
+    }
+
+    #[test]
+    fn start_times_use_utc_plus_eight_and_handle_pending_jobs() {
+        assert_eq!(format_started_at(None), "-");
+        assert_eq!(format_started_at(Some(0)), "1970-01-01 08:00:00 UTC+8");
+    }
+
+    #[test]
+    fn queue_columns_expand_to_fit_their_contents() {
+        let mut short = summary(1, State::Running);
+        short.started_at = Some(0);
+        let mut long = summary(2, State::Running);
+        long.started_at = Some(0);
+        long.devices = [0, 1]
+            .into_iter()
+            .map(|id| Device {
+                kind: Kind::Ascend,
+                id,
+                name: "test".into(),
+                visible: id.to_string(),
+                npu: Some(id),
+                chip: Some(0),
+            })
+            .collect();
+
+        let table = format_queue_table(&[short, long], 0);
+        let lines: Vec<_> = table.lines().collect();
+        let started_column = lines[0].find("STARTED").unwrap();
+        assert_eq!(lines[1].find("1970-01-01").unwrap(), started_column);
+        assert_eq!(lines[2].find("1970-01-01").unwrap(), started_column);
     }
 
     #[test]

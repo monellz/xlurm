@@ -240,8 +240,14 @@ fn batch_snapshot_pending_cancel_and_restart_recovery() {
     fs::write(h.dir.path().join("script with spaces.sh"), "echo modified").unwrap();
     assert_eq!(h.job(second)["state"], "PENDING");
     let queue = String::from_utf8(h.run("xqueue", &[]).stdout).unwrap();
-    assert!(queue.contains("WAIT         RUN"));
+    assert!(queue.contains("STARTED (UTC+8)"));
+    assert!(
+        queue
+            .lines()
+            .any(|line| line.contains("PENDING") && line.contains("-"))
+    );
     let detail = String::from_utf8(h.run("xqueue", &[&second.to_string()]).stdout).unwrap();
+    assert!(detail.contains("Started at: -"));
     assert!(detail.contains("Wait time: "));
     assert!(detail.contains("Run time: -"));
     let summaries: Vec<Value> =

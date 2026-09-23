@@ -35,7 +35,7 @@ xcancel 3                                # Cancel a task and its process group
 | --- | --- |
 | `xrun [OPTIONS] COMMAND [ARGS...]` | Wait for a task in the foreground, forward stdout/stderr, and cancel on Ctrl-C |
 | `xbatch [OPTIONS] SCRIPT [ARGS...]` | Snapshot and submit a script without waiting for resources |
-| `xqueue [JOB_ID]` | Show your latest 100 active tasks with wait/run times; with an ID, show detailed results for your task |
+| `xqueue [JOB_ID]` | Show your latest 100 active tasks with start, wait, and run times; with an ID, show detailed results for your task |
 | `xcancel JOB_ID` | Cancel a task and its process group; equivalent to `xqueue --cancel JOB_ID` |
 | `xinfo` | Show devices, external usage, and allocations |
 | `sudo xlurm clean` | Remove all logs while the scheduler is stopped and no task is running |
@@ -55,7 +55,7 @@ xqueue --all --json
 xinfo --json
 ```
 
-`xqueue` displays at most the latest 100 matching tasks, including with `--all`; root sees tasks from every user. Durations use `HH:MM:SS`, or `D-HH:MM:SS` after 24 hours. A pending job's wait time and a running job's run time continue increasing. Jobs cancelled before starting show `-` for run time.
+`xqueue` displays at most the latest 100 matching tasks, including with `--all`; root sees tasks from every user. Start times use UTC+8, while durations use `HH:MM:SS`, or `D-HH:MM:SS` after 24 hours. A pending job's wait time and a running job's run time continue increasing. Jobs that have not started show `-` for the start and run times.
 
 Options for `xrun` go before the command name. Starting at the command name, all later arguments are passed to the task, including options such as `--help` and `--gpus`. The `--` separator is optional, so the older form `xrun -g 1 -- python train.py` remains supported.
 
