@@ -124,6 +124,8 @@ Do not create system accounts or depend on real accelerator devices in tests.
 - Use concise Conventional Commit subjects consistent with repository history:
   `feat: ...`, `fix: ...`, `docs: ...`, `test: ...`, `refactor: ...`, or
   `chore: ...`. Write the subject in imperative form, without a trailing period.
+- When a commit relates to GitHub issues, append their numbers to the subject as
+  `(#12)` or `(#12, #34)` for multiple issues.
 - Add a commit body when the reason, security consequence, migration behavior,
   or compatibility tradeoff is not clear from the subject and diff.
 - Do not commit build artifacts from `target/`. Change `Cargo.lock` only when the
