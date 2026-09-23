@@ -55,7 +55,7 @@ xqueue --all --json
 xinfo --json
 ```
 
-`xqueue` displays at most the latest 100 matching tasks, including with `--all`; root sees tasks from every user. Start times use UTC+8, while durations use `HH:MM:SS`, or `D-HH:MM:SS` after 24 hours. A pending job's wait time and a running job's run time continue increasing. Jobs that have not started show `-` for the start and run times.
+`xqueue` displays at most the latest 100 matching tasks, including with `--all`; all users see host-wide queue summaries. Start times use UTC+8, while durations use `HH:MM:SS`, or `D-HH:MM:SS` after 24 hours. A pending job's wait time and a running job's run time continue increasing. Jobs that have not started show `-` for the start and run times.
 
 Options for `xrun` go before the command name. Starting at the command name, all later arguments are passed to the task, including options such as `--help` and `--gpus`. The `--` separator is optional, so the older form `xrun -g 1 -- python train.py` remains supported.
 
@@ -130,7 +130,7 @@ xrun / xbatch / xqueue / xcancel / xinfo
 
 | Operation | Regular user | Root administrator |
 | --- | --- | --- |
-| `xinfo`, queue summary | Device info is host-wide; queue contains only own tasks | Can see the whole host |
+| `xinfo`, queue summary | Can see the whole host | Can see the whole host |
 | Submit a task | Runs with the user's UID/GID | Runs as root |
 | Task details, command, environment, logs | Own tasks only | All tasks |
 | Cancel a task | Own tasks only | All tasks |
@@ -138,7 +138,7 @@ xrun / xbatch / xqueue / xcancel / xinfo
 
 Identity comes from the kernel's `SO_PEERCRED`; clients cannot choose task ownership through JSON or the `USER` environment variable. Before execution, the scheduler re-resolves the local account and supplementary groups, sets supplementary groups plus real/effective/saved GID and UID, then enters the user's working directory and executes the command. Files owned by the user are accessed with that user's permissions, and groups required by Ascend/NVIDIA drivers are preserved.
 
-Tasks set `no_new_privs`, so a task cannot rely on sudo or setuid programs for privilege escalation. Queue summaries contain only the task name, owner, resources, and status; the daemon also restricts non-root callers to their own tasks. Commands, scripts, and environments are never included. Scheduling remains a simple submission-order allocation attempt and does not add quotas, priorities, or billing.
+Tasks set `no_new_privs`, so a task cannot rely on sudo or setuid programs for privilege escalation. Queue summaries are host-wide and contain only the task name, owner, resources, and status. Commands, scripts, and environments are never included; task details, logs, and cancellation remain owner-only. Scheduling remains a simple submission-order allocation attempt and does not add quotas, priorities, or billing.
 
 This project provides multi-user identity and control permissions. GPU/NPU access is described through visible-device environment variables and is not yet enforced with cgroups or device-node restrictions. Programs that bypass the scheduler can still compete for devices. MIG, memory partitioning, and intentionally detached background services are unsupported. CPU tasks set both device visibility variables to `-1`.
 

@@ -93,7 +93,7 @@ def main():
             active.append(second)
             assert wait_job(second, "PENDING")["owner"]["uid"] == bob.pw_uid
             summary = json.loads(command("xqueue", ["--json"], bob).stdout)
-            assert {row["owner"]["uid"] for row in summary} == {bob.pw_uid}
+            assert {row["owner"]["uid"] for row in summary} == {alice.pw_uid, bob.pw_uid}
             assert all("spec" not in row and "env" not in row for row in summary)
             root_summary = json.loads(command("xqueue", ["--json"]).stdout)
             assert {row["owner"]["uid"] for row in root_summary} == {alice.pw_uid, bob.pw_uid}

@@ -154,13 +154,7 @@ fn handle(
                 .map(|job| Response::Job(Box::new(job)))
         }
         Request::Queue => Ok(Response::Queue(
-            scheduler
-                .store
-                .jobs
-                .iter()
-                .filter(|job| uid == 0 || job.owner.uid == uid)
-                .map(JobSummary::from)
-                .collect(),
+            scheduler.store.jobs.iter().map(JobSummary::from).collect(),
         )),
         Request::Get(id) => {
             let job = scheduler.get(id)?;
@@ -282,11 +276,12 @@ mod tests {
         let Response::Queue(jobs) = queue else {
             panic!("unexpected response");
         };
-        assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].id, other_id);
+        assert_eq!(jobs.len(), 2);
+        assert!(jobs.iter().any(|job| job.id == other_id));
+        assert!(jobs.iter().any(|job| job.id == id));
         let json = serde_json::to_string(&jobs).unwrap();
         assert!(json.contains("bob") && json.contains("public-name"));
-        assert!(!json.contains("alice"));
+        assert!(json.contains("alice"));
         assert!(!json.contains("private-command") && !json.contains("private-token"));
         let root_queue = handle(&mut scheduler, &paths, 0, 0, Request::Queue).unwrap();
         assert!(matches!(root_queue, Response::Queue(jobs) if jobs.len() == 2));
