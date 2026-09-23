@@ -138,6 +138,7 @@ pub enum Request {
     Log { id: u64, offset: u64 },
     Info,
     Stop,
+    Restart,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

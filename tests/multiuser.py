@@ -103,7 +103,9 @@ def main():
             denied = command("xcancel", [str(first)], bob, check=False)
             assert denied.returncode != 0 and "permission denied" in denied.stderr, denied
             assert command("xlurm", ["stop"], bob, check=False).returncode != 0
-            command("xinfo", [], alice)  # A denied stop must not stop the daemon.
+            assert command("xlurm", ["restart", "--backend", "none"], bob,
+                check=False).returncode != 0
+            command("xinfo", [], alice)  # Denied lifecycle commands must not stop the daemon.
             # Private state is inaccessible even outside the CLI.
             for path in (root / "state" / "state.json", root / "state" / "jobs" / f"{first}.log"):
                 def demote_bob():

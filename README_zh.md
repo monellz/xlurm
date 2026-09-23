@@ -76,12 +76,15 @@ sudo xlurm start --backend ascend            # 只管理 Ascend
 sudo xlurm start --backend none              # CPU 模式，无需驱动
 sudo xlurm daemon --backend auto --max-running 32  # 前台运行
 sudo xlurm stop                              # 停止调度，已启动任务继续运行
+sudo xlurm restart                           # 停止并启动；有任务运行时拒绝操作
 sudo xlurm clean                             # 所有任务结束后删除日志
 ```
 
 `xlurm clean` 是仅供管理员使用的离线操作。调度器仍在运行，或持久化状态中存在 `RUNNING` 任务时，它都会报错退出。两项检查均通过后，命令删除全部任务 `.log` 文件和 `daemon.log`，但保留排队任务、任务历史、结果和其他 spool 文件。如果 worker 在调度器停止期间结束，需要先重启调度器收集结果，再停止并执行 `clean`。后续新任务及后台调度器重启会重新创建日志文件。
 
 `start` 对已运行的调度器不做修改；更换 backend 或并发上限需要先 stop。再次启动会接管运行中的任务、读取离线期间完成的结果并继续排队任务。机器重启或 worker 异常消失后，无结果的运行任务标记为 `FAILED`，不会自动重跑。
+
+`restart` 等价于依次执行 `stop` 和 `start`，并接受与 `start` 相同的 backend 和并发上限参数。与 `stop` 不同，只要存在 `RUNNING` 任务，它就会报错并保持调度器运行；排队中的任务不影响重启。
 
 默认共享状态目录为 `/var/lib/xlurm`。所有用户自动连接这里的 Unix socket，无需用户各自启动服务。可以通过 `XLURM_HOME` 指定其他由管理员持有的短绝对路径，所有客户端和调度器必须使用同一路径。没有配置文件，也没有网络监听端口。
 

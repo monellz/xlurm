@@ -417,6 +417,37 @@ fn background_start_and_single_daemon_lock() {
 }
 
 #[test]
+fn restart_replaces_an_idle_daemon_and_refuses_running_jobs() {
+    let mut h = Harness::new("none", 1);
+    h.start();
+    h.run("xlurm", &["restart", "--backend", "none"]);
+    h.daemon.as_mut().unwrap().wait().unwrap();
+
+    let job = h.submit(&[
+        "-g",
+        "0",
+        "--wrap",
+        "while [ ! -f release ]; do sleep 0.05; done",
+    ]);
+    h.wait_state(job, "RUNNING");
+    let refused = h
+        .command("xlurm")
+        .args(["restart", "--backend", "none"])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr)
+            .contains("cannot restart while jobs are running: 1")
+    );
+    assert_eq!(h.job(job)["state"], "RUNNING");
+
+    fs::write(h.dir.path().join("release"), "").unwrap();
+    h.wait_state(job, "COMPLETED");
+    h.run("xlurm", &["stop"]);
+}
+
+#[test]
 fn clean_requires_an_idle_stopped_scheduler_and_removes_only_logs() {
     let mut h = Harness::new("none", 1);
     h.start();

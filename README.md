@@ -78,12 +78,15 @@ sudo xlurm start --backend ascend            # Manage only Ascend
 sudo xlurm start --backend none              # CPU mode; no device driver required
 sudo xlurm daemon --backend auto --max-running 32  # Run in the foreground
 sudo xlurm stop                              # Stop scheduling; already-started tasks continue
+sudo xlurm restart                           # Stop and start; refuse if any task is running
 sudo xlurm clean                             # Remove logs after all tasks have finished
 ```
 
 `xlurm clean` is an offline administrator action. It refuses to run if the scheduler is active or if persisted state contains a `RUNNING` task. After both checks pass, it removes every task `.log` file and `daemon.log` while preserving queued tasks, task history, results, and other spool files. If a worker finishes while the scheduler is stopped, restart the scheduler once so it can collect the result before stopping it and running `clean`. New tasks and a subsequent background start create new log files.
 
 `start` does not modify an already-running scheduler; stop it first to change the backend or concurrency limit. A subsequent start takes over running tasks, reads results completed while it was offline, and continues queued tasks. After a machine reboot or unexpected worker disappearance, running tasks without results are marked `FAILED` and are not rerun automatically.
+
+`restart` is equivalent to `stop` followed by `start` and accepts the same backend and concurrency options as `start`. Unlike `stop`, it refuses to stop the scheduler while any task is `RUNNING`; queued tasks do not prevent a restart.
 
 The default shared state directory is `/var/lib/xlurm`. All users automatically connect to its Unix socket without starting their own service. Set `XLURM_HOME` to another short absolute path owned by the administrator; all clients and the scheduler must use the same path. There is no configuration file and no network listening port.
 

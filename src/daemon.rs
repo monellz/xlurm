@@ -111,7 +111,7 @@ pub fn serve(paths: Paths, backend: Backend, max_running: usize) -> Result<()> {
                     continue;
                 }
             };
-            let stop = matches!(request, Request::Stop);
+            let stop = matches!(request, Request::Stop | Request::Restart);
             let response = handle(&mut scheduler, &paths, uid, gid, request)
                 .unwrap_or_else(|error| Response::Error(format!("{error:#}")));
             // A client disconnecting does not roll back an accepted submission.
@@ -189,11 +189,25 @@ fn handle(
             })
         }
         Request::Info => Ok(Response::Info(scheduler.info())),
-        Request::Stop => {
+        Request::Stop | Request::Restart => {
             ensure!(
                 uid == 0 || uid == unsafe { libc::geteuid() },
-                "only the administrator may stop the scheduler"
+                "only the administrator may stop or restart the scheduler"
             );
+            if matches!(request, Request::Restart) {
+                let running: Vec<_> = scheduler
+                    .store
+                    .jobs
+                    .iter()
+                    .filter(|job| job.state == crate::model::State::Running)
+                    .map(|job| job.id.to_string())
+                    .collect();
+                ensure!(
+                    running.is_empty(),
+                    "cannot restart while jobs are running: {}",
+                    running.join(", ")
+                );
+            }
             Ok(Response::Ok)
         }
     }
@@ -252,6 +266,7 @@ mod tests {
             Request::Log { id, offset: 0 },
             Request::Cancel(id),
             Request::Stop,
+            Request::Restart,
         ] {
             assert!(handle(&mut scheduler, &paths, 23457, 23457, request).is_err());
         }

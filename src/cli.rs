@@ -34,6 +34,8 @@ enum Action {
     Daemon(DaemonArgs),
     /// Stop scheduling; running jobs survive and are adopted on restart.
     Stop,
+    /// Restart the scheduler; refuse while any job is running.
+    Restart(DaemonArgs),
     /// Remove all logs while the scheduler is stopped and no job is running.
     Clean,
     /// Run a command, stream its log, and return its exit code.
@@ -183,6 +185,7 @@ pub fn run(wrapper: Option<&str>) -> Result<i32> {
             request(&paths, &Request::Stop)?;
             println!("Scheduler stopped; running jobs continue.");
         }
+        Action::Restart(args) => restart(&paths, args)?,
         Action::Clean => clean(&paths)?,
         Action::Run(args) => {
             crate::install_signals()?;
@@ -385,6 +388,25 @@ fn start(paths: &Paths, args: DaemonArgs) -> Result<()> {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+fn restart(paths: &Paths, args: DaemonArgs) -> Result<()> {
+    request(paths, &Request::Restart)?;
+
+    let deadline = Instant::now() + Duration::from_secs(45);
+    loop {
+        if let Some(lock) = try_lock(&paths.0.join("daemon.lock"))? {
+            drop(lock);
+            break;
+        }
+        ensure!(
+            Instant::now() < deadline,
+            "daemon shutdown timed out; scheduler was stopped but not restarted"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    start(paths, args)
 }
 
 fn follow(paths: &Paths, id: u64) -> Result<i32> {
