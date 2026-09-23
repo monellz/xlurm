@@ -15,9 +15,8 @@ This installs `xlurm`, `xrun`, `xbatch`, `xqueue`, `xcancel`, and `xinfo` to `~/
 On a shared server, an administrator installs the binaries system-wide and starts the shared scheduler:
 
 ```bash
-# Run once as administrator; root owns the binaries and all users share them
-cargo build --release --locked
-sudo install -o root -g root -m 0755 target/release/{xlurm,xrun,xbatch,xqueue,xcancel,xinfo} /usr/local/bin/
+# Build all binaries and install them to /usr/local/bin using sudo
+./install.sh
 sudo xlurm start
 
 # Run as a regular user, without sudo
@@ -27,6 +26,8 @@ xbatch -g 2 train.sh                     # Submit a bash script in the backgroun
 xqueue                                   # Show queued and running tasks
 xcancel 3                                # Cancel a task and its process group
 ```
+
+`install.sh` requires Cargo and `sudo`. It builds with `--release --locked`, then installs all six binaries as root-owned files with mode 0755. It does not start or restart the scheduler.
 
 ## Commands
 

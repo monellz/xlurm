@@ -13,9 +13,8 @@ cargo install --path . --locked
 多人共用的服务器由管理员安装到系统目录并启动共享调度器：
 
 ```bash
-# 管理员安装一次，二进制由 root 持有，所有用户共用
-cargo build --release --locked
-sudo install -o root -g root -m 0755 target/release/{xlurm,xrun,xbatch,xqueue,xcancel,xinfo} /usr/local/bin/
+# 构建全部二进制，并通过 sudo 安装到 /usr/local/bin
+./install.sh
 sudo xlurm start
 
 # 以下由普通用户执行，不使用 sudo
@@ -25,6 +24,8 @@ xbatch -g 2 train.sh                     # 后台提交 bash 脚本，返回 job
 xqueue                                   # 看排队和运行中的任务
 xcancel 3                                # 取消任务及其进程组
 ```
+
+`install.sh` 需要 Cargo 和 `sudo`。脚本使用 `--release --locked` 构建，将 6 个二进制安装为 root 所有、权限 0755；它不会启动或重启调度器。
 
 ## 命令
 
