@@ -570,14 +570,13 @@ fn format_queue_table(jobs: &[JobSummary], timestamp: u64) -> String {
         "JOB",
         "USER",
         "STATE",
-        "COUNT",
         "DEVICES",
         "STARTED (UTC+8)",
         "WAIT",
         "RUN",
         "NAME",
     ];
-    let rows: Vec<[String; 9]> = jobs
+    let rows: Vec<[String; 8]> = jobs
         .iter()
         .map(|job| {
             let (wait_time, run_time) =
@@ -586,7 +585,6 @@ fn format_queue_table(jobs: &[JobSummary], timestamp: u64) -> String {
                 job.id.to_string(),
                 job.owner.name.clone(),
                 format!("{:?}", job.state).to_uppercase(),
-                job.count.to_string(),
                 device_names(&job.devices),
                 job.started_at.map_or_else(
                     || "-".into(),
@@ -598,7 +596,7 @@ fn format_queue_table(jobs: &[JobSummary], timestamp: u64) -> String {
             ]
         })
         .collect();
-    let widths: [usize; 8] = std::array::from_fn(|column| {
+    let widths: [usize; 7] = std::array::from_fn(|column| {
         rows.iter()
             .map(|row| row[column].chars().count())
             .max()
@@ -606,10 +604,10 @@ fn format_queue_table(jobs: &[JobSummary], timestamp: u64) -> String {
             .max(headers[column].chars().count())
     });
     let mut output = String::new();
-    let header: [String; 9] = std::array::from_fn(|column| headers[column].into());
+    let header: [String; 8] = std::array::from_fn(|column| headers[column].into());
     for row in std::iter::once(&header).chain(rows.iter()) {
         output.push_str(&format!(
-            "{:<w0$} {:<w1$} {:<w2$} {:<w3$} {:<w4$} {:<w5$} {:<w6$} {:<w7$} {}\n",
+            "{:<w0$} {:<w1$} {:<w2$} {:<w3$} {:<w4$} {:<w5$} {:<w6$} {}\n",
             row[0],
             row[1],
             row[2],
@@ -618,7 +616,6 @@ fn format_queue_table(jobs: &[JobSummary], timestamp: u64) -> String {
             row[5],
             row[6],
             row[7],
-            row[8],
             w0 = widths[0],
             w1 = widths[1],
             w2 = widths[2],
@@ -626,7 +623,6 @@ fn format_queue_table(jobs: &[JobSummary], timestamp: u64) -> String {
             w4 = widths[4],
             w5 = widths[5],
             w6 = widths[6],
-            w7 = widths[7],
         ));
     }
     output
@@ -684,20 +680,37 @@ fn format_duration(seconds: u64) -> String {
 
 fn device_names(devices: &[Device]) -> String {
     if devices.is_empty() {
-        "-".into()
-    } else {
-        devices
-            .iter()
-            .map(|d| format!("{}:{}", d.kind, d.id))
-            .collect::<Vec<_>>()
-            .join(",")
+        return "-".into();
     }
+    let mut groups: Vec<(Kind, Vec<u32>)> = Vec::new();
+    for device in devices {
+        if let Some((_, ids)) = groups.iter_mut().find(|(kind, _)| *kind == device.kind) {
+            ids.push(device.id);
+        } else {
+            groups.push((device.kind, vec![device.id]));
+        }
+    }
+    groups
+        .into_iter()
+        .map(|(kind, ids)| {
+            if ids.len() == 1 {
+                format!("{kind}:{}", ids[0])
+            } else {
+                format!(
+                    "{kind}:[{}]",
+                    ids.iter().map(u32::to_string).collect::<Vec<_>>().join(",")
+                )
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        format_duration, format_queue_table, format_started_at, job_times, visible_queue_jobs,
+        device_names, format_duration, format_queue_table, format_started_at, job_times,
+        visible_queue_jobs,
     };
     use crate::model::{Device, JobSummary, Kind, Owner, State};
 
@@ -760,9 +773,35 @@ mod tests {
 
         let table = format_queue_table(&[short, long], 0);
         let lines: Vec<_> = table.lines().collect();
+        assert!(lines[0].contains("DEVICES"));
+        assert!(!lines[0].contains("COUNT"));
+        assert!(lines[2].contains("ascend:[0,1]"));
         let started_column = lines[0].find("STARTED").unwrap();
         assert_eq!(lines[1].find("1970-01-01").unwrap(), started_column);
         assert_eq!(lines[2].find("1970-01-01").unwrap(), started_column);
+    }
+
+    #[test]
+    fn device_names_group_ids_by_vendor() {
+        let devices = [
+            (Kind::Nvidia, 2),
+            (Kind::Nvidia, 0),
+            (Kind::Ascend, 1),
+            (Kind::Ascend, 3),
+        ]
+        .into_iter()
+        .map(|(kind, id)| Device {
+            kind,
+            id,
+            name: "test".into(),
+            visible: id.to_string(),
+            npu: None,
+            chip: None,
+        })
+        .collect::<Vec<_>>();
+        assert_eq!(device_names(&[]), "-");
+        assert_eq!(device_names(&devices[..1]), "nvidia:2");
+        assert_eq!(device_names(&devices), "nvidia:[2,0],ascend:[1,3]");
     }
 
     #[test]
