@@ -724,7 +724,7 @@ fn queue_device_names(job: &JobSummary) -> String {
         return "cpu".into();
     }
     format!(
-        "{}:{} requested",
+        "{}:{}",
         job.kind.map_or("auto".into(), |kind| kind.to_string()),
         job.count
     )
@@ -843,9 +843,9 @@ mod tests {
         let mut job = summary(1, State::Pending);
         job.count = 2;
         job.kind = Some(Kind::Ascend);
-        assert_eq!(queue_device_names(&job), "ascend:2 requested");
+        assert_eq!(queue_device_names(&job), "ascend:2");
         job.kind = None;
-        assert_eq!(queue_device_names(&job), "auto:2 requested");
+        assert_eq!(queue_device_names(&job), "auto:2");
         job.count = 0;
         assert_eq!(queue_device_names(&job), "cpu");
         job.state = State::Running;
