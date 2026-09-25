@@ -93,6 +93,8 @@ pub struct JobSummary {
     pub name: String,
     pub state: State,
     pub count: usize,
+    #[serde(default)]
+    pub kind: Option<Kind>,
     pub devices: Vec<Device>,
     pub submitted_at: u64,
     pub started_at: Option<u64>,
@@ -107,6 +109,7 @@ impl From<&Job> for JobSummary {
             name: job.spec.name.clone(),
             state: job.state,
             count: job.spec.count,
+            kind: job.spec.kind,
             devices: job.devices.clone(),
             submitted_at: job.submitted_at,
             started_at: job.started_at,

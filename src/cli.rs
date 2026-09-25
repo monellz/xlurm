@@ -595,7 +595,7 @@ fn format_queue_table(jobs: &[JobSummary], timestamp: u64, show_year: bool) -> S
                 job.id.to_string(),
                 job.owner.name.clone(),
                 format!("{:?}", job.state).to_uppercase(),
-                device_names(&job.devices),
+                queue_device_names(job),
                 job.started_at.map_or_else(
                     || "-".into(),
                     |started_at| format_timestamp(started_at, 8 * 60 * 60, "", show_year),
@@ -716,11 +716,25 @@ fn device_names(devices: &[Device]) -> String {
         .join(",")
 }
 
+fn queue_device_names(job: &JobSummary) -> String {
+    if !job.devices.is_empty() || job.state != State::Pending {
+        return device_names(&job.devices);
+    }
+    if job.count == 0 {
+        return "cpu".into();
+    }
+    format!(
+        "{}:{} requested",
+        job.kind.map_or("auto".into(), |kind| kind.to_string()),
+        job.count
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         device_names, format_duration, format_queue_table, format_started_at, job_times,
-        visible_queue_jobs,
+        queue_device_names, visible_queue_jobs,
     };
     use crate::model::{Device, JobSummary, Kind, Owner, State};
 
@@ -735,6 +749,7 @@ mod tests {
             name: format!("job-{id}"),
             state,
             count: 0,
+            kind: None,
             devices: vec![],
             submitted_at: id,
             started_at: None,
@@ -821,6 +836,20 @@ mod tests {
         assert_eq!(device_names(&[]), "-");
         assert_eq!(device_names(&devices[..1]), "nvidia:2");
         assert_eq!(device_names(&devices), "nvidia:[2,0],ascend:[1,3]");
+    }
+
+    #[test]
+    fn pending_jobs_show_requested_devices() {
+        let mut job = summary(1, State::Pending);
+        job.count = 2;
+        job.kind = Some(Kind::Ascend);
+        assert_eq!(queue_device_names(&job), "ascend:2 requested");
+        job.kind = None;
+        assert_eq!(queue_device_names(&job), "auto:2 requested");
+        job.count = 0;
+        assert_eq!(queue_device_names(&job), "cpu");
+        job.state = State::Running;
+        assert_eq!(queue_device_names(&job), "-");
     }
 
     #[test]

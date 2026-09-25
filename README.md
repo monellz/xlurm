@@ -55,7 +55,7 @@ xqueue --all --json
 xinfo --json
 ```
 
-`xqueue` displays at most the latest 100 matching tasks, including with `--all`; all users see host-wide queue summaries. Its `DEVICES` column lists assigned devices, grouping multiple IDs from one vendor as `ascend:[0,1]` or `nvidia:[0,1]`. Jobs without assigned devices show `-`. Start times use UTC+8: the default list shows `MM-DD HH:MM:SS`, while `--all` shows `YYYY-MM-DD HH:MM:SS`. Job details retain the year. Durations use `HH:MM:SS`, or `D-HH:MM:SS` after 24 hours. A pending job's wait time and a running job's run time continue increasing. Jobs that have not started show `-` for the start and run times.
+`xqueue` displays at most the latest 100 matching tasks, including with `--all`; all users see host-wide queue summaries. For pending jobs, its `DEVICES` column shows the requested type and count (for example, `ascend:2 requested`, `auto:1 requested`, or `cpu`). Once a job starts, the column lists assigned devices, grouping multiple IDs from one vendor as `ascend:[0,1]` or `nvidia:[0,1]`. Start times use UTC+8: the default list shows `MM-DD HH:MM:SS`, while `--all` shows `YYYY-MM-DD HH:MM:SS`. Job details retain the year. Durations use `HH:MM:SS`, or `D-HH:MM:SS` after 24 hours. A pending job's wait time and a running job's run time continue increasing. Jobs that have not started show `-` for the start and run times.
 
 Options for `xrun` go before the command name. Starting at the command name, all later arguments are passed to the task, including options such as `--help` and `--gpus`. The `--` separator is optional, so the older form `xrun -g 1 -- python train.py` remains supported.
 
