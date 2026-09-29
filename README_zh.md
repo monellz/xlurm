@@ -1,6 +1,6 @@
 # xlurm
 
-极简的 **Linux 单机、多用户** GPU / 华为 Ascend 调度器。Rust 编写，直接用进程 Executor 执行任务，不依赖 tmux。一个共享调度器统一分配整机设备，每个任务以提交用户自己的身份执行。
+极简的 **Linux 单机、多用户** NVIDIA（`nv`）/ 摩尔线程（`mtt`）/ 华为 Ascend（`asc`）加速卡调度器。Rust 编写，直接用进程 Executor 执行任务，不依赖 tmux。一个共享调度器统一分配整机设备，每个任务以提交用户自己的身份执行。
 
 在仓库目录中，一条命令即可安装全部命令：
 
@@ -38,7 +38,7 @@ xcancel 3                                # 取消任务及其进程组
 | `xinfo` | 显示设备、外部占用、分配情况 |
 | `sudo xlurm clean` | 调度器已停止且没有运行中任务时删除全部日志 |
 
-任务选项只有四个：`-g/--gpus N`（也可写 `--devices`，默认 1）、`--device nvidia|ascend`、`-n/--name NAME`、`-t/--time-limit SECONDS`。`-g` 对两类卡均适用；`-g 0` 提交 CPU 任务。
+任务选项只有四个：`-g/--gpus N`（也可写 `--devices`，默认 1）、`--device nv|mtt|asc`、`-n/--name NAME`、`-t/--time-limit SECONDS`。也兼容完整名称 `nvidia|mthreads|ascend`。`-g` 对各类卡均适用；`-g 0` 提交 CPU 任务。
 
 ```bash
 xrun --device ascend -g 2 python train_npu.py
@@ -71,8 +71,9 @@ xinfo --json
 ## 调度器
 
 ```bash
-sudo xlurm start                             # 后台启动，自动发现两类卡
+sudo xlurm start                             # 后台启动，自动发现已安装驱动的加速卡
 sudo xlurm start --backend ascend            # 只管理 Ascend
+sudo xlurm start --backend mtt               # 只管理摩尔线程 GPU
 sudo xlurm start --backend none              # CPU 模式，无需驱动
 sudo xlurm daemon --backend auto --max-running 32  # 前台运行
 sudo xlurm stop                              # 停止调度，已启动任务继续运行
@@ -117,9 +118,10 @@ xrun / xbatch / xqueue / xcancel / xinfo
 ```
 
 - 调度器按提交顺序扫描，资源足够就启动；大任务等资源时允许后面的小任务先跑。最多同时运行 32 个任务，可用 `--max-running` 调整。
-- 每个设备槽独占分配，单个任务只使用一个厂商的设备池。自动选择优先尝试 NVIDIA，再尝试 Ascend。多芯片 Ascend 卡按独立计算芯片分配。
+- 每个设备槽独占分配，单个任务只使用一个厂商的设备池。自动选择优先尝试 NVIDIA，再尝试 Ascend，最后尝试摩尔线程 GPU。多芯片 Ascend 卡按独立计算芯片分配。
 - NVIDIA 用 `nvidia-smi` 发现与监测，按 GPU UUID 设置 `CUDA_VISIBLE_DEVICES`，避免 CUDA 与管理工具索引顺序不同。
 - Ascend 用 `npu-smi info -m` 解析映射，按逻辑 ID 设置 `ASCEND_RT_VISIBLE_DEVICES`。兼容 `Chip Logic ID` 和 Ascend950PR 的 `Chip Phy-ID` 列；不会把多芯片卡的物理卡号误当成逻辑号。物理卡号/芯片号仅用于驱动查询。
+- 摩尔线程用 `mthreads-gmi --list-gpus` 发现设备并保存 UUID；通过 `mthreads-gmi` 进程表识别外部占用。任务设置 `MTHREADS_VISIBLE_DEVICES` UUID 和 `MUSA_VISIBLE_DEVICES` 设备序号。显示及命令简写为 `nv`、`mtt`、`asc`。
 - 每两秒检查驱动报告的外部计算进程；有占用的设备暂不分配，查询失败显示 `unknown` 并暂停分配。单次驱动调用最多等待 3 秒。
 - worker 持有继承的文件锁，调度器重启后通过锁接管任务；不靠裸 PID 判断任务是否存活。退出结果通过原子文件写入。
 - 取消先向进程组发 SIGTERM，一秒后仍未退出则发 SIGKILL。任务主进程结束时清理同组后台子进程，并回收孤儿进程，然后释放设备。

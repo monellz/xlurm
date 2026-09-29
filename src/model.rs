@@ -5,15 +5,24 @@ use std::{collections::BTreeMap, path::PathBuf};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
+    #[value(alias = "nv")]
     Nvidia,
+    #[value(alias = "asc")]
     Ascend,
+    #[value(alias = "mtt")]
+    Mthreads,
+}
+
+impl Kind {
+    pub const PRIORITY: [Self; 3] = [Self::Nvidia, Self::Ascend, Self::Mthreads];
 }
 
 impl std::fmt::Display for Kind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::Nvidia => "nvidia",
-            Self::Ascend => "ascend",
+            Self::Nvidia => "nv",
+            Self::Ascend => "asc",
+            Self::Mthreads => "mtt",
         })
     }
 }
@@ -23,7 +32,7 @@ pub struct Device {
     pub kind: Kind,
     pub id: u32,
     pub name: String,
-    /// NVIDIA UUID or Ascend logical ID; never a physical Ascend card ID.
+    /// Stable vendor-specific identifier used for allocation and visibility.
     pub visible: String,
     pub npu: Option<u32>,
     pub chip: Option<u32>,

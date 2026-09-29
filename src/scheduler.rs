@@ -278,7 +278,7 @@ fn allocate(
     if spec.count == 0 {
         return Some(vec![]);
     }
-    for kind in [Kind::Nvidia, Kind::Ascend] {
+    for kind in Kind::PRIORITY {
         if spec.kind.is_some_and(|wanted| wanted != kind) {
             continue;
         }

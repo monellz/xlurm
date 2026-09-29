@@ -168,6 +168,8 @@ fn execute(paths: &Paths, job: &Job) -> Result<Outcome> {
         .env("XLURM_SUBMIT_DIR", &job.spec.cwd)
         .env("CUDA_VISIBLE_DEVICES", visible(job, Kind::Nvidia))
         .env("ASCEND_RT_VISIBLE_DEVICES", visible(job, Kind::Ascend))
+        .env("MUSA_VISIBLE_DEVICES", visible_ids(job, Kind::Mthreads))
+        .env("MTHREADS_VISIBLE_DEVICES", visible(job, Kind::Mthreads))
         .env_remove("ASCEND_DEVICE_ID")
         .stdin(Stdio::null())
         .process_group(0);
@@ -275,6 +277,20 @@ fn visible(job: &Job, kind: Kind) -> String {
         "-1".into()
     } else {
         values.join(",")
+    }
+}
+
+fn visible_ids(job: &Job, kind: Kind) -> String {
+    let ids: Vec<_> = job
+        .devices
+        .iter()
+        .filter(|d| d.kind == kind)
+        .map(|d| d.id.to_string())
+        .collect();
+    if ids.is_empty() {
+        "-1".into()
+    } else {
+        ids.join(",")
     }
 }
 

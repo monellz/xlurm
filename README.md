@@ -1,6 +1,6 @@
 # xlurm
 
-A minimal **Linux single-host, multi-user** GPU / Huawei Ascend scheduler. Written in Rust, it runs tasks directly through process executors without tmux. One shared scheduler allocates whole-machine devices, and each task runs with the submitting user's identity.
+A minimal **Linux single-host, multi-user** NVIDIA (`nv`) / Moore Threads (`mtt`) / Huawei Ascend (`asc`) accelerator scheduler. Written in Rust, it runs tasks directly through process executors without tmux. One shared scheduler allocates whole-machine devices, and each task runs with the submitting user's identity.
 
 中文文档：[README_zh.md](README_zh.md)
 
@@ -40,7 +40,7 @@ xcancel 3                                # Cancel a task and its process group
 | `xinfo` | Show devices, external usage, and allocations |
 | `sudo xlurm clean` | Remove all logs while the scheduler is stopped and no task is running |
 
-There are only four task options: `-g/--gpus N` (also `--devices`, default `1`), `--device nvidia|ascend`, `-n/--name NAME`, and `-t/--time-limit SECONDS`. `-g` applies to both device types; `-g 0` submits a CPU task.
+There are only four task options: `-g/--gpus N` (also `--devices`, default `1`), `--device nv|mtt|asc`, `-n/--name NAME`, and `-t/--time-limit SECONDS`. Full names `nvidia|mthreads|ascend` are also accepted. `-g` applies to any device type; `-g 0` submits a CPU task.
 
 ```bash
 xrun --device ascend -g 2 python train_npu.py
@@ -73,8 +73,9 @@ Arguments are passed directly to the process; they are not assembled into a shel
 ## Scheduler
 
 ```bash
-sudo xlurm start                             # Start in the background and discover both device types
+sudo xlurm start                             # Start in the background and discover installed accelerator drivers
 sudo xlurm start --backend ascend            # Manage only Ascend
+sudo xlurm start --backend mtt               # Manage only Moore Threads GPUs
 sudo xlurm start --backend none              # CPU mode; no device driver required
 sudo xlurm daemon --backend auto --max-running 32  # Run in the foreground
 sudo xlurm stop                              # Stop scheduling; already-started tasks continue
@@ -119,9 +120,10 @@ xrun / xbatch / xqueue / xcancel / xinfo
 ```
 
 - The scheduler scans tasks in submission order and starts tasks when resources are available; a later small task may run while a larger task waits. At most 32 tasks run at once, configurable with `--max-running`.
-- Each device slot is allocated exclusively, and a task uses only one vendor's device pool. Automatic selection tries NVIDIA first, then Ascend. Multi-chip Ascend cards are allocated by individual compute chip.
+- Each device slot is allocated exclusively, and a task uses only one vendor's device pool. Automatic selection tries NVIDIA, then Ascend, then Moore Threads. Multi-chip Ascend cards are allocated by individual compute chip.
 - NVIDIA devices are discovered and monitored with `nvidia-smi`; `CUDA_VISIBLE_DEVICES` is set by GPU UUID to avoid differences between CUDA and management-tool index order.
 - Ascend devices use `npu-smi info -m` to parse mappings, and `ASCEND_RT_VISIBLE_DEVICES` is set by logical ID. Both `Chip Logic ID` and the `Chip Phy-ID` column used by Ascend950PR are supported; physical card numbers are not mistaken for logical IDs on multi-chip cards. Physical card and chip numbers are used only for driver queries.
+- Moore Threads devices are discovered by UUID through `mthreads-gmi --list-gpus`; external process use is read from its process table. Jobs receive allocated UUIDs in `MTHREADS_VISIBLE_DEVICES` and device indices in `MUSA_VISIBLE_DEVICES`. Display labels and accepted short names are `nv`, `mtt`, and `asc`.
 - External compute processes reported by the driver are checked every two seconds. Occupied devices are not allocated; query failures are shown as `unknown` and pause allocation. Each driver call waits at most three seconds.
 - Workers hold inherited file locks, allowing the scheduler to take over tasks after a restart without relying on bare PIDs to determine liveness. Exit results are written atomically.
 - Cancellation first sends SIGTERM to the process group, then sends SIGKILL if it is still running after one second. When the main task process exits, the same group is cleaned up, orphan processes are reaped, and devices are released.

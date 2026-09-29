@@ -12,8 +12,12 @@ use std::time::{Duration, Instant};
 pub enum Backend {
     #[default]
     Auto,
+    #[value(alias = "nv")]
     Nvidia,
+    #[value(alias = "asc")]
     Ascend,
+    #[value(alias = "mtt")]
+    Mthreads,
     None,
 }
 
@@ -22,6 +26,7 @@ pub struct Inventory {
     pub status: HashMap<String, String>,
     nvidia: PathBuf,
     ascend: PathBuf,
+    mthreads: PathBuf,
 }
 
 impl Inventory {
@@ -37,11 +42,13 @@ impl Inventory {
                     "/usr/local/Ascend/driver/tools/npu-smi",
                 ],
             ),
+            mthreads: locate("mthreads-gmi", &[]),
         };
-        for kind in [Kind::Nvidia, Kind::Ascend] {
+        for kind in Kind::PRIORITY {
             if backend == Backend::None
                 || (backend == Backend::Nvidia && kind != Kind::Nvidia)
                 || (backend == Backend::Ascend && kind != Kind::Ascend)
+                || (backend == Backend::Mthreads && kind != Kind::Mthreads)
             {
                 continue;
             }
@@ -57,6 +64,8 @@ impl Inventory {
                 Kind::Ascend => {
                     output(&inventory.ascend, &["info", "-m"]).and_then(|text| parse_ascend(&text))
                 }
+                Kind::Mthreads => output(&inventory.mthreads, &["--list-gpus"])
+                    .and_then(|text| parse_mthreads(&text)),
             };
             match found {
                 Ok(devices) => inventory.devices.extend(devices),
@@ -83,6 +92,11 @@ impl Inventory {
                     ],
                 )
             });
+        let mthreads_busy = self
+            .devices
+            .iter()
+            .any(|d| d.kind == Kind::Mthreads)
+            .then(|| output(&self.mthreads, &[]));
         for device in &self.devices {
             let idle = match device.kind {
                 Kind::Nvidia => nvidia_busy
@@ -104,6 +118,11 @@ impl Inventory {
                         .ok()
                         .and_then(|text| ascend_idle(&text))
                 }
+                Kind::Mthreads => mthreads_busy
+                    .as_ref()
+                    .and_then(|result| result.as_ref().ok())
+                    .and_then(|text| mthreads_busy_devices(text))
+                    .map(|busy| !busy.contains(&device.id)),
             };
             self.status.insert(
                 device.key(),
@@ -216,6 +235,73 @@ fn parse_nvidia(text: &str) -> Result<Vec<Device>> {
         });
     }
     validate(devices)
+}
+
+fn parse_mthreads(text: &str) -> Result<Vec<Device>> {
+    let mut devices = Vec::new();
+    for line in text.lines().filter(|line| line.contains("UUID")) {
+        let (left, right) = line
+            .split_once(":")
+            .context("invalid mthreads-gmi device row")?;
+        let id = left
+            .trim()
+            .strip_prefix("GPU ")
+            .context("invalid mthreads-gmi device ID")?
+            .parse::<u32>()?;
+        let name = right
+            .split("(UUID")
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let uuid = right
+            .split_once("UUID :")
+            .context("missing mthreads GPU UUID")?
+            .1
+            .trim()
+            .trim_end_matches(')')
+            .trim();
+        ensure!(!uuid.is_empty(), "missing mthreads GPU UUID");
+        devices.push(Device {
+            kind: Kind::Mthreads,
+            id,
+            visible: uuid.into(),
+            name,
+            npu: None,
+            chip: None,
+        });
+    }
+    validate(devices)
+}
+
+fn mthreads_busy_devices(text: &str) -> Option<HashSet<u32>> {
+    let mut in_process_table = false;
+    let mut saw_process_header = false;
+    let mut busy = HashSet::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed == "Processes:" {
+            in_process_table = true;
+            saw_process_header = true;
+            continue;
+        }
+        if !in_process_table
+            || trimmed.is_empty()
+            || trimmed.starts_with('+')
+            || trimmed.starts_with("ID ")
+            || trimmed == "Usage"
+            || trimmed.chars().all(|ch| ch == '-')
+        {
+            continue;
+        }
+        let mut fields = trimmed.split_whitespace();
+        let id = fields.next()?.parse::<u32>().ok()?;
+        let pid = fields.next()?.parse::<u32>().ok()?;
+        if pid > 0 {
+            busy.insert(id);
+        }
+    }
+    saw_process_header.then_some(busy)
 }
 
 fn parse_ascend(text: &str) -> Result<Vec<Device>> {
