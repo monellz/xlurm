@@ -67,8 +67,16 @@ struct DaemonArgs {
 #[derive(Args)]
 struct Resources {
     /// Number of exclusive accelerator devices; 0 runs a CPU-only job.
-    #[arg(short = 'g', long, visible_alias = "devices", default_value_t = 1)]
-    gpus: usize,
+    #[arg(
+        short = 'g',
+        long,
+        visible_alias = "devices",
+        help = "Number of devices to allocate (default: 1)"
+    )]
+    gpus: Option<usize>,
+    /// Exact device IDs, such as -i 0,2.
+    #[arg(short = 'i', long = "device-ids", value_delimiter = ',')]
+    device_ids: Vec<u32>,
     /// Restrict the vendor; otherwise use the first pool that fits.
     #[arg(long, value_enum)]
     device: Option<Kind>,
@@ -313,6 +321,29 @@ fn submission(
         resources.time_limit != Some(0),
         "time-limit must be positive"
     );
+    let device_ids = if resources.device_ids.is_empty() {
+        None
+    } else {
+        ensure!(
+            resources
+                .device_ids
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                == resources.device_ids.len(),
+            "device IDs must not contain duplicates"
+        );
+        ensure!(
+            resources
+                .gpus
+                .is_none_or(|count| count == resources.device_ids.len()),
+            "-g count must match the number of -i device IDs"
+        );
+        Some(resources.device_ids)
+    };
+    let count = device_ids
+        .as_ref()
+        .map_or_else(|| resources.gpus.unwrap_or(1), Vec::len);
     Ok(Submission {
         name: resources
             .name
@@ -320,7 +351,8 @@ fn submission(
         command,
         cwd: std::env::current_dir()?,
         env: std::env::vars().collect(),
-        count: resources.gpus,
+        count,
+        device_ids,
         kind: resources.device,
         time_limit: resources.time_limit,
         script,
@@ -723,6 +755,13 @@ fn queue_device_names(job: &JobSummary) -> String {
     if job.count == 0 {
         return "cpu".into();
     }
+    if let Some(ids) = &job.device_ids {
+        return format!(
+            "{}:[{}]",
+            job.kind.map_or("auto".into(), |kind| kind.to_string()),
+            ids.iter().map(u32::to_string).collect::<Vec<_>>().join(",")
+        );
+    }
     format!(
         "{}:{}",
         job.kind.map_or("auto".into(), |kind| kind.to_string()),
@@ -749,6 +788,7 @@ mod tests {
             name: format!("job-{id}"),
             state,
             count: 0,
+            device_ids: None,
             kind: None,
             devices: vec![],
             submitted_at: id,
@@ -800,7 +840,7 @@ mod tests {
         let lines: Vec<_> = table.lines().collect();
         assert!(lines[0].contains("DEVICES"));
         assert!(!lines[0].contains("COUNT"));
-        assert!(lines[2].contains("ascend:[0,1]"));
+        assert!(lines[2].contains("asc:[0,1]"));
         let started_column = lines[0].find("STARTED").unwrap();
         assert_eq!(lines[1].find("01-01 08:00:00").unwrap(), started_column);
         assert_eq!(lines[2].find("01-01 08:00:00").unwrap(), started_column);
@@ -834,8 +874,8 @@ mod tests {
         })
         .collect::<Vec<_>>();
         assert_eq!(device_names(&[]), "-");
-        assert_eq!(device_names(&devices[..1]), "nvidia:2");
-        assert_eq!(device_names(&devices), "nvidia:[2,0],ascend:[1,3]");
+        assert_eq!(device_names(&devices[..1]), "nv:2");
+        assert_eq!(device_names(&devices), "nv:[2,0],asc:[1,3]");
     }
 
     #[test]
@@ -843,9 +883,13 @@ mod tests {
         let mut job = summary(1, State::Pending);
         job.count = 2;
         job.kind = Some(Kind::Ascend);
-        assert_eq!(queue_device_names(&job), "ascend:2");
+        assert_eq!(queue_device_names(&job), "asc:2");
         job.kind = None;
         assert_eq!(queue_device_names(&job), "auto:2");
+        job.kind = Some(Kind::Ascend);
+        job.device_ids = Some(vec![0, 2]);
+        assert_eq!(queue_device_names(&job), "asc:[0,2]");
+        job.device_ids = None;
         job.count = 0;
         assert_eq!(queue_device_names(&job), "cpu");
         job.state = State::Running;

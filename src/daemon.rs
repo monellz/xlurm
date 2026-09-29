@@ -242,6 +242,7 @@ mod tests {
             env: [("TOKEN".into(), "private-token".into())].into(),
             name: "public-name".into(),
             count: 0,
+            device_ids: None,
             kind: None,
             time_limit: None,
             script: None,

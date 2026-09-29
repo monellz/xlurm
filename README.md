@@ -40,11 +40,12 @@ xcancel 3                                # Cancel a task and its process group
 | `xinfo` | Show devices, external usage, and allocations |
 | `sudo xlurm clean` | Remove all logs while the scheduler is stopped and no task is running |
 
-There are only four task options: `-g/--gpus N` (also `--devices`, default `1`), `--device nv|mtt|asc`, `-n/--name NAME`, and `-t/--time-limit SECONDS`. Full names `nvidia|mthreads|ascend` are also accepted. `-g` applies to any device type; `-g 0` submits a CPU task.
+Resource options include `-g/--gpus N` (also `--devices`, default `1`), `-i/--device-ids ID[,ID...]`, and `--device nv|mtt|asc`; `-n/--name NAME` and `-t/--time-limit SECONDS` are also available. Full backend names `nvidia|mthreads|ascend` are accepted. `-i` requests exact device IDs, for example `xrun -i 0,2 python train.py`; all IDs must belong to one backend. On a single-backend machine the backend is inferred. If the IDs exist on multiple backends, use `--device` to disambiguate. `-g` may be combined with `-i`, but the count must match; when omitted, the count is inferred from the IDs. `-g 0` still submits a CPU task.
 
 ```bash
 xrun --device ascend -g 2 python train_npu.py
 xrun --device nvidia -g 1 -t 3600 python train.py --epochs 10
+xrun -i 0,2 -g 2 python train.py
 xrun -g 0 bash -c 'echo hello; exit 7'     # xrun also returns 7
 xbatch --device ascend -g 2 train.sh --epochs 10
 xbatch -g 1 --wrap 'python prepare.py && python train.py'
@@ -55,7 +56,7 @@ xqueue --all --json
 xinfo --json
 ```
 
-`xqueue` displays at most the latest 100 matching tasks, including with `--all`; all users see host-wide queue summaries. For pending jobs, its `DEVICES` column shows the requested type and count (for example, `ascend:2`, `auto:1`, or `cpu`). Once a job starts, the column lists assigned devices, grouping multiple IDs from one vendor as `ascend:[0,1]` or `nvidia:[0,1]`. Start times use UTC+8: the default list shows `MM-DD HH:MM:SS`, while `--all` shows `YYYY-MM-DD HH:MM:SS`. Job details retain the year. Durations use `HH:MM:SS`, or `D-HH:MM:SS` after 24 hours. A pending job's wait time and a running job's run time continue increasing. Jobs that have not started show `-` for the start and run times.
+`xqueue` displays at most the latest 100 matching tasks, including with `--all`; all users see host-wide queue summaries. For pending jobs, its `DEVICES` column shows the requested type and count (for example, `asc:2`, `auto:1`, or `cpu`) or the requested IDs. Once a job starts, the column lists assigned devices, grouping multiple IDs from one vendor as `asc:[0,1]` or `nv:[0,1]`. Start times use UTC+8: the default list shows `MM-DD HH:MM:SS`, while `--all` shows `YYYY-MM-DD HH:MM:SS`. Job details retain the year. Durations use `HH:MM:SS`, or `D-HH:MM:SS` after 24 hours. A pending job's wait time and a running job's run time continue increasing. Jobs that have not started show `-` for the start and run times.
 
 Options for `xrun` go before the command name. Starting at the command name, all later arguments are passed to the task, including options such as `--help` and `--gpus`. The `--` separator is optional, so the older form `xrun -g 1 -- python train.py` remains supported.
 

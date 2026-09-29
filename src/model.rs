@@ -52,6 +52,8 @@ pub struct Submission {
     pub env: BTreeMap<String, String>,
     pub name: String,
     pub count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_ids: Option<Vec<u32>>,
     pub kind: Option<Kind>,
     pub time_limit: Option<u64>,
     /// Batch scripts are snapshotted at submission, not read when dequeued.
@@ -102,6 +104,8 @@ pub struct JobSummary {
     pub name: String,
     pub state: State,
     pub count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_ids: Option<Vec<u32>>,
     #[serde(default)]
     pub kind: Option<Kind>,
     pub devices: Vec<Device>,
@@ -118,6 +122,7 @@ impl From<&Job> for JobSummary {
             name: job.spec.name.clone(),
             state: job.state,
             count: job.spec.count,
+            device_ids: job.spec.device_ids.clone(),
             kind: job.spec.kind,
             devices: job.devices.clone(),
             submitted_at: job.submitted_at,

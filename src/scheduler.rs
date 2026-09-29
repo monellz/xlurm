@@ -99,13 +99,34 @@ impl<E: Executor> Scheduler<E> {
         Ok(())
     }
 
-    pub fn submit(&mut self, spec: Submission, owner: Owner) -> Result<Job> {
+    pub fn submit(&mut self, mut spec: Submission, owner: Owner) -> Result<Job> {
         ensure!(
             spec.script.is_some() || !spec.command.is_empty(),
             "empty command"
         );
         ensure!(spec.cwd.is_dir(), "working directory does not exist");
         ensure!(spec.time_limit != Some(0), "time-limit must be positive");
+        if let Some(ids) = &spec.device_ids {
+            ensure!(!ids.is_empty(), "device IDs must not be empty");
+            ensure!(
+                spec.count == ids.len(),
+                "device count must match device IDs"
+            );
+            ensure!(
+                ids.iter().collect::<HashSet<_>>().len() == ids.len(),
+                "device IDs must not contain duplicates"
+            );
+            let kinds = matching_kinds(&spec, &self.inventory.devices);
+            ensure!(
+                !kinds.is_empty(),
+                "requested device IDs do not exist in the selected backend"
+            );
+            ensure!(
+                kinds.len() == 1,
+                "device IDs are ambiguous across backends; specify --device"
+            );
+            spec.kind = Some(kinds[0]);
+        }
         ensure!(
             allocate(&spec, &self.inventory.devices, &HashSet::new()).is_some(),
             "requested {} device(s), but no matching pool has enough devices",
@@ -275,6 +296,20 @@ fn allocate(
     devices: &[Device],
     reserved: &HashSet<String>,
 ) -> Option<Vec<Device>> {
+    if let Some(ids) = &spec.device_ids {
+        let kind = matching_kinds(spec, devices).into_iter().next()?;
+        let selected: Option<Vec<_>> = ids
+            .iter()
+            .map(|id| {
+                devices
+                    .iter()
+                    .find(|device| device.kind == kind && device.id == *id)
+                    .filter(|device| !reserved.contains(&device.key()))
+                    .cloned()
+            })
+            .collect();
+        return selected.filter(|selected| selected.len() == ids.len());
+    }
     if spec.count == 0 {
         return Some(vec![]);
     }
@@ -293,6 +328,22 @@ fn allocate(
         }
     }
     None
+}
+
+fn matching_kinds(spec: &Submission, devices: &[Device]) -> Vec<Kind> {
+    Kind::PRIORITY
+        .into_iter()
+        .filter(|kind| spec.kind.is_none_or(|wanted| wanted == *kind))
+        .filter(|kind| {
+            spec.device_ids.as_ref().is_some_and(|ids| {
+                ids.iter().all(|id| {
+                    devices
+                        .iter()
+                        .any(|device| device.kind == *kind && device.id == *id)
+                })
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -326,6 +377,7 @@ mod tests {
                 env: Default::default(),
                 name: "history".into(),
                 count: 0,
+                device_ids: None,
                 kind: None,
                 time_limit: None,
                 script: None,
@@ -455,6 +507,7 @@ mod tests {
             env: Default::default(),
             name: "test".into(),
             count: 2,
+            device_ids: None,
             kind: None,
             time_limit: None,
             script: None,

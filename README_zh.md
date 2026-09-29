@@ -38,11 +38,12 @@ xcancel 3                                # 取消任务及其进程组
 | `xinfo` | 显示设备、外部占用、分配情况 |
 | `sudo xlurm clean` | 调度器已停止且没有运行中任务时删除全部日志 |
 
-任务选项只有四个：`-g/--gpus N`（也可写 `--devices`，默认 1）、`--device nv|mtt|asc`、`-n/--name NAME`、`-t/--time-limit SECONDS`。也兼容完整名称 `nvidia|mthreads|ascend`。`-g` 对各类卡均适用；`-g 0` 提交 CPU 任务。
+任务资源选项包括 `-g/--gpus N`（也可写 `--devices`，默认 1）、`-i/--device-ids ID[,ID...]` 和 `--device nv|mtt|asc`；另有 `-n/--name NAME`、`-t/--time-limit SECONDS`。也兼容完整后端名称 `nvidia|mthreads|ascend`。`-i` 按设备编号精确申请，例如 `xrun -i 0,2 python train.py`；编号必须属于同一后端。通常单后端机器会自动识别，编号在多个后端都存在时用 `--device` 消歧。`-g` 可与 `-i` 同时指定，但数量必须一致；只写 `-i` 时数量由编号个数决定。`-g 0` 仍提交 CPU 任务。
 
 ```bash
 xrun --device ascend -g 2 python train_npu.py
 xrun --device nvidia -g 1 -t 3600 python train.py --epochs 10
+xrun -i 0,2 -g 2 python train.py
 xrun -g 0 bash -c 'echo hello; exit 7'     # xrun 也返回 7
 xbatch --device ascend -g 2 train.sh --epochs 10
 xbatch -g 1 --wrap 'python prepare.py && python train.py'
@@ -53,7 +54,7 @@ xqueue --all --json
 xinfo --json
 ```
 
-`xqueue` 最多显示符合条件的最新 100 条任务，使用 `--all` 时也一样；所有用户都能查看全主机队列摘要。`DEVICES` 列对排队任务显示申请的设备类型和数量（例如 `ascend:2`、`auto:1` 或 `cpu`）；任务启动后显示已分配设备，同一厂商的多个 ID 合并为 `ascend:[0,1]` 或 `nvidia:[0,1]`。启动时间使用 UTC+8：默认列表显示 `MM-DD HH:MM:SS`，使用 `--all` 时显示 `YYYY-MM-DD HH:MM:SS`；任务详情保留年份。时长格式为 `HH:MM:SS`，超过 24 小时后为 `D-HH:MM:SS`。排队中任务的等待时间、运行中任务的执行时间会持续增加；尚未启动的任务以 `-` 显示启动时间和执行时长。
+`xqueue` 最多显示符合条件的最新 100 条任务，使用 `--all` 时也一样；所有用户都能查看全主机队列摘要。`DEVICES` 列对排队任务显示申请的设备类型和数量（例如 `asc:2`、`auto:1` 或 `cpu`）或指定的设备编号；任务启动后显示已分配设备，同一厂商的多个 ID 合并为 `asc:[0,1]` 或 `nv:[0,1]`。启动时间使用 UTC+8：默认列表显示 `MM-DD HH:MM:SS`，使用 `--all` 时显示 `YYYY-MM-DD HH:MM:SS`；任务详情保留年份。时长格式为 `HH:MM:SS`，超过 24 小时后为 `D-HH:MM:SS`。排队中任务的等待时间、运行中任务的执行时间会持续增加；尚未启动的任务以 `-` 显示启动时间和执行时长。
 
 `xrun` 的调度选项写在命令名前；从命令名开始，后续参数均传给任务程序，包括 `--help`、`--gpus` 等同名选项。分隔符 `--` 可省略，原来的 `xrun -g 1 -- python train.py` 写法也兼容。
 

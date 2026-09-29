@@ -405,6 +405,63 @@ fn both_vendors_are_exclusive_and_external_busy_or_unknown_devices_wait() {
 }
 
 #[test]
+fn explicit_device_ids_select_exact_devices_and_validate_counts() {
+    let mut h = Harness::new("auto", 2);
+    h.drivers();
+    h.start();
+
+    let output = h.run(
+        "xrun",
+        &[
+            "-i",
+            "3,2",
+            "-g",
+            "2",
+            "--",
+            "sh",
+            "-c",
+            "printf '%s|%s' \"$ASCEND_RT_VISIBLE_DEVICES\" \"$ASCEND_DEVICE_ID\"",
+        ],
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "3,2|0");
+
+    let batch = h.run(
+        "xbatch",
+        &[
+            "-i",
+            "2,3",
+            "-g",
+            "2",
+            "--wrap",
+            "printf '%s' \"$ASCEND_RT_VISIBLE_DEVICES\"",
+        ],
+    );
+    let batch_id = String::from_utf8(batch.stdout)
+        .unwrap()
+        .trim()
+        .parse::<u64>()
+        .unwrap();
+    h.wait_state(batch_id, "COMPLETED");
+    assert_eq!(h.log(batch_id), "2,3");
+
+    let mismatch = h
+        .command("xrun")
+        .args(["-i", "2,3", "-g", "1", "--", "true"])
+        .output()
+        .unwrap();
+    assert!(!mismatch.status.success());
+    assert!(String::from_utf8_lossy(&mismatch.stderr).contains("must match"));
+
+    let duplicate = h
+        .command("xrun")
+        .args(["-i", "2,2", "--", "true"])
+        .output()
+        .unwrap();
+    assert!(!duplicate.status.success());
+    assert!(String::from_utf8_lossy(&duplicate.stderr).contains("duplicates"));
+}
+
+#[test]
 fn cancellation_and_timeout_kill_process_groups() {
     let mut h = Harness::new("none", 2);
     h.start();
