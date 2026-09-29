@@ -290,6 +290,7 @@ fn mthreads_busy_devices(text: &str) -> Option<HashSet<u32>> {
             || trimmed.starts_with('+')
             || trimmed.starts_with("ID ")
             || trimmed == "Usage"
+            || trimmed.eq_ignore_ascii_case("No running processes found")
             || trimmed.chars().all(|ch| ch == '-')
         {
             continue;
