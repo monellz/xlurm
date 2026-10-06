@@ -145,7 +145,7 @@ impl Harness {
         // fork can inherit the writer before CLOEXEC takes effect, making a
         // just-written script fail with ETXTBSY even after fs::write returns.
         // Links also work when the test's temporary directory is mounted noexec.
-        for name in ["nvidia-smi", "npu-smi"] {
+        for name in ["nvidia-smi", "npu-smi", "mx-smi"] {
             symlink(
                 Path::new(env!("CARGO_MANIFEST_DIR"))
                     .join("tests/fixtures")

@@ -18,6 +18,8 @@ pub enum Backend {
     Ascend,
     #[value(alias = "mtt")]
     Mthreads,
+    #[value(alias = "mx")]
+    Metax,
     None,
 }
 
@@ -27,6 +29,7 @@ pub struct Inventory {
     nvidia: PathBuf,
     ascend: PathBuf,
     mthreads: PathBuf,
+    metax: PathBuf,
 }
 
 impl Inventory {
@@ -43,12 +46,14 @@ impl Inventory {
                 ],
             ),
             mthreads: locate("mthreads-gmi", &[]),
+            metax: locate("mx-smi", &["/opt/mxdriver/bin/mx-smi"]),
         };
         for kind in Kind::PRIORITY {
             if backend == Backend::None
                 || (backend == Backend::Nvidia && kind != Kind::Nvidia)
                 || (backend == Backend::Ascend && kind != Kind::Ascend)
                 || (backend == Backend::Mthreads && kind != Kind::Mthreads)
+                || (backend == Backend::Metax && kind != Kind::Metax)
             {
                 continue;
             }
@@ -66,6 +71,9 @@ impl Inventory {
                 }
                 Kind::Mthreads => output(&inventory.mthreads, &["--list-gpus"])
                     .and_then(|text| parse_mthreads(&text)),
+                Kind::Metax => {
+                    output(&inventory.metax, &["-L"]).and_then(|text| parse_metax(&text))
+                }
             };
             match found {
                 Ok(devices) => inventory.devices.extend(devices),
@@ -97,6 +105,11 @@ impl Inventory {
             .iter()
             .any(|d| d.kind == Kind::Mthreads)
             .then(|| output(&self.mthreads, &[]));
+        let metax_busy = self
+            .devices
+            .iter()
+            .any(|d| d.kind == Kind::Metax)
+            .then(|| output(&self.metax, &["--show-all-process"]));
         for device in &self.devices {
             let idle = match device.kind {
                 Kind::Nvidia => nvidia_busy
@@ -122,6 +135,11 @@ impl Inventory {
                     .as_ref()
                     .and_then(|result| result.as_ref().ok())
                     .and_then(|text| mthreads_busy_devices(text))
+                    .map(|busy| !busy.contains(&device.id)),
+                Kind::Metax => metax_busy
+                    .as_ref()
+                    .and_then(|result| result.as_ref().ok())
+                    .and_then(|text| metax_busy_devices(text))
                     .map(|busy| !busy.contains(&device.id)),
             };
             self.status.insert(
@@ -305,6 +323,75 @@ fn mthreads_busy_devices(text: &str) -> Option<HashSet<u32>> {
     saw_process_header.then_some(busy)
 }
 
+fn parse_metax(text: &str) -> Result<Vec<Device>> {
+    let mut devices = Vec::new();
+    for line in text
+        .lines()
+        .filter(|line| line.trim_start().starts_with("GPU#"))
+    {
+        let line = line.trim();
+        let (id, rest) = line
+            .strip_prefix("GPU#")
+            .context("invalid mx-smi device ID")?
+            .split_once(char::is_whitespace)
+            .context("invalid mx-smi device row")?;
+        let id = id.parse::<u32>().context("invalid mx-smi device ID")?;
+        ensure!(
+            !rest.contains("Not Available"),
+            "MetaX GPU {id} is not available to this process"
+        );
+        let (name, uuid) = rest
+            .split_once("(UUID:")
+            .context("missing MetaX GPU UUID")?;
+        let uuid = uuid.trim().trim_end_matches(')').trim();
+        ensure!(
+            uuid.starts_with("GPU-") && !uuid.contains(char::is_whitespace),
+            "invalid MetaX GPU UUID"
+        );
+        devices.push(Device {
+            kind: Kind::Metax,
+            id,
+            visible: uuid.into(),
+            name: name.split_whitespace().next().unwrap_or("MetaX").into(),
+            npu: None,
+            chip: None,
+        });
+    }
+    validate(devices)
+}
+
+fn metax_busy_devices(text: &str) -> Option<HashSet<u32>> {
+    if text.lines().any(|line| line.contains("no process found")) {
+        return Some(HashSet::new());
+    }
+    let mut in_process_table = false;
+    let mut saw_process_header = false;
+    let mut busy = HashSet::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with("| Process:") {
+            in_process_table = true;
+            continue;
+        }
+        if !in_process_table || line.is_empty() || line.starts_with('|') && line.contains("GPU ") {
+            continue;
+        }
+        let fields = line
+            .trim_matches('|')
+            .split_whitespace()
+            .collect::<Vec<_>>();
+        if fields.len() >= 2
+            && let (Ok(id), Ok(pid)) = (fields[0].parse::<u32>(), fields[1].parse::<u32>())
+        {
+            saw_process_header = true;
+            if pid > 0 {
+                busy.insert(id);
+            }
+        }
+    }
+    saw_process_header.then_some(busy)
+}
+
 fn parse_ascend(text: &str) -> Result<Vec<Device>> {
     let mut lines = text.lines();
     let header = lines
@@ -422,6 +509,34 @@ mod tests {
         let devices = parse_nvidia("3, GPU-abc, NVIDIA H100\n").unwrap();
         assert_eq!(devices[0].visible, "GPU-abc");
         assert!(parse_nvidia("driver failure").is_err());
+    }
+
+    #[test]
+    fn metax_uses_uuid_for_identity_and_fails_on_partial_inventory() {
+        let devices = parse_metax(
+            "mx-smi  version: 2.3.1\nGPU#0    MXC550      0000:2b:00.0   Available (UUID: GPU-abc-123)\n",
+        )
+        .unwrap();
+        assert_eq!(devices[0].kind, Kind::Metax);
+        assert_eq!(devices[0].visible, "GPU-abc-123");
+        assert_eq!(devices[0].name, "MXC550");
+        assert!(parse_metax(
+            "GPU#0 MXC550 bus Available (UUID: GPU-abc)\nGPU#1 MXC550 bus Not Available(MetaX Sysfs File Unaccessible)\n"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn metax_process_table_fails_closed_without_known_empty_or_rows() {
+        assert_eq!(
+            metax_busy_devices("| Process: |\n| no process found |\n"),
+            Some(HashSet::new())
+        );
+        assert_eq!(
+            metax_busy_devices("| Process: |\n| GPU PID Process Name |\n| 3 1234 train 100MiB |\n"),
+            Some(HashSet::from([3]))
+        );
+        assert_eq!(metax_busy_devices("| Process: |\n| unavailable |\n"), None);
     }
 
     #[test]

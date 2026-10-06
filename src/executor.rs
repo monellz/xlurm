@@ -166,10 +166,11 @@ fn execute(paths: &Paths, job: &Job) -> Result<Outcome> {
         .env("LOGNAME", &owner.name)
         .env("XLURM_JOB_ID", job.id.to_string())
         .env("XLURM_SUBMIT_DIR", &job.spec.cwd)
-        .env("CUDA_VISIBLE_DEVICES", visible(job, Kind::Nvidia))
+        .env("CUDA_VISIBLE_DEVICES", visible_for_cuda(job))
         .env("ASCEND_RT_VISIBLE_DEVICES", visible(job, Kind::Ascend))
         .env("MUSA_VISIBLE_DEVICES", visible_ids(job, Kind::Mthreads))
         .env("MTHREADS_VISIBLE_DEVICES", visible(job, Kind::Mthreads))
+        .env("MACA_VISIBLE_DEVICES", visible_ids(job, Kind::Metax))
         .env_remove("ASCEND_DEVICE_ID")
         .stdin(Stdio::null())
         .process_group(0);
@@ -277,6 +278,14 @@ fn visible(job: &Job, kind: Kind) -> String {
         "-1".into()
     } else {
         values.join(",")
+    }
+}
+
+fn visible_for_cuda(job: &Job) -> String {
+    if job.devices.iter().any(|device| device.kind == Kind::Metax) {
+        visible_ids(job, Kind::Metax)
+    } else {
+        visible(job, Kind::Nvidia)
     }
 }
 
