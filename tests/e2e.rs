@@ -462,6 +462,62 @@ fn explicit_device_ids_select_exact_devices_and_validate_counts() {
 }
 
 #[test]
+fn ppu_devices_are_discovered_exclusively_and_fail_closed() {
+    let mut h = Harness::new("ppu", 2);
+    h.drivers();
+    symlink(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ppu-smi"),
+        h.dir.path().join("bin/ppu-smi"),
+    )
+    .unwrap();
+    fs::write(h.dir.path().join("ppu-busy"), "").unwrap();
+    h.start();
+
+    let devices: Vec<Value> = serde_json::from_slice(&h.run("xinfo", &["--json"]).stdout).unwrap();
+    assert_eq!(devices.len(), 2);
+    assert_eq!(devices[0]["device"]["kind"], "ppu");
+    assert_eq!(devices[0]["device"]["visible"], "GPU-ppu-0");
+    assert_eq!(devices[1]["status"], "busy");
+
+    let run = h.run(
+        "xrun",
+        &[
+            "--device",
+            "ppu",
+            "-i",
+            "0",
+            "--",
+            "sh",
+            "-c",
+            "printf '%s' \"$CUDA_VISIBLE_DEVICES\"",
+        ],
+    );
+    assert_eq!(String::from_utf8(run.stdout).unwrap(), "GPU-ppu-0");
+
+    fs::write(h.dir.path().join("ppu-probe-error"), "").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let devices: Vec<Value> =
+            serde_json::from_slice(&h.run("xinfo", &["--json"]).stdout).unwrap();
+        if devices.iter().all(|device| device["status"] == "unknown") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "failed PPU probe did not become unknown"
+        );
+        sleep(Duration::from_millis(100));
+    }
+    let pending = h.run("xbatch", &["--device", "ppu", "-g", "1", "--wrap", "true"]);
+    let id = String::from_utf8(pending.stdout)
+        .unwrap()
+        .trim()
+        .parse::<u64>()
+        .unwrap();
+    assert_eq!(h.job(id)["state"], "PENDING");
+}
+
+#[test]
 fn cancellation_and_timeout_kill_process_groups() {
     let mut h = Harness::new("none", 2);
     h.start();

@@ -1,0 +1,13 @@
+#!/bin/sh
+case "$1" in
+  --query-ppu=*)
+    if [ -e "$TEST_ROOT/ppu-discovery-error" ]; then exit 1; fi
+    printf 'index, uuid, name\n0, GPU-ppu-0, Mock PPU\n1, GPU-ppu-1, Mock PPU\n'
+    ;;
+  --query-compute-apps=*)
+    if [ -e "$TEST_ROOT/ppu-probe-error" ]; then exit 1; fi
+    printf 'uuid, pid\n'
+    if [ -e "$TEST_ROOT/ppu-busy" ]; then printf 'GPU-ppu-1, 1234\n'; fi
+    ;;
+  *) exit 1 ;;
+esac

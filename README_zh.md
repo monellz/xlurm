@@ -1,6 +1,6 @@
 # xlurm
 
-极简的 **Linux 单机、多用户** NVIDIA（`nv`）/ 摩尔线程（`mtt`）/ MetaX（`mx`）/ 华为 Ascend（`asc`）加速卡调度器。Rust 编写，直接用进程 Executor 执行任务，不依赖 tmux。一个共享调度器统一分配整机设备，每个任务以提交用户自己的身份执行。
+极简的 **Linux 单机、多用户** NVIDIA（`nv`）/ 摩尔线程（`mtt`）/ MetaX（`mx`）/ 华为 Ascend（`asc`）/ T-Head PPU（`ppu`）加速卡调度器。Rust 编写，直接用进程 Executor 执行任务，不依赖 tmux。一个共享调度器统一分配整机设备，每个任务以提交用户自己的身份执行。
 
 在仓库目录中，一条命令即可安装全部命令：
 
@@ -38,10 +38,11 @@ xcancel 3                                # 取消任务及其进程组
 | `xinfo` | 显示设备、外部占用、分配情况 |
 | `sudo xlurm clean` | 调度器已停止且没有运行中任务时删除全部日志 |
 
-任务资源选项包括 `-g/--gpus N`（也可写 `--devices`，默认 1）、`-i/--device-ids ID[,ID...]` 和 `--device nv|mtt|mx|asc`；另有 `-n/--name NAME`、`-t/--time-limit SECONDS`。也兼容完整后端名称 `nvidia|mthreads|metax|ascend`。`-i` 按设备编号精确申请，例如 `xrun -i 0,2 python train.py`；编号必须属于同一后端。通常单后端机器会自动识别，编号在多个后端都存在时用 `--device` 消歧。`-g` 可与 `-i` 同时指定，但数量必须一致；只写 `-i` 时数量由编号个数决定。`-g 0` 仍提交 CPU 任务。
+任务资源选项包括 `-g/--gpus N`（也可写 `--devices`，默认 1）、`-i/--device-ids ID[,ID...]` 和 `--device nv|mtt|mx|asc|ppu`；另有 `-n/--name NAME`、`-t/--time-limit SECONDS`。也兼容完整后端名称 `nvidia|mthreads|metax|ascend|ppu`。`-i` 按设备编号精确申请，例如 `xrun -i 0,2 python train.py`；编号必须属于同一后端。通常单后端机器会自动识别，编号在多个后端都存在时用 `--device` 消歧。`-g` 可与 `-i` 同时指定，但数量必须一致；只写 `-i` 时数量由编号个数决定。`-g 0` 仍提交 CPU 任务。
 
 ```bash
 xrun --device ascend -g 2 python train_npu.py
+xrun --device ppu -g 1 python train.py
 xrun --device nvidia -g 1 -t 3600 python train.py --epochs 10
 xrun -i 0,2 -g 2 python train.py
 xrun -g 0 bash -c 'echo hello; exit 7'     # xrun 也返回 7
@@ -76,6 +77,7 @@ sudo xlurm start                             # 后台启动，自动发现已安
 sudo xlurm start --backend ascend            # 只管理 Ascend
 sudo xlurm start --backend mtt               # 只管理摩尔线程 GPU
 sudo xlurm start --backend metax             # 只管理 MetaX GPU
+sudo xlurm start --backend ppu               # 只管理 T-Head PPU
 sudo xlurm start --backend none              # CPU 模式，无需驱动
 sudo xlurm daemon --backend auto --max-running 32  # 前台运行
 sudo xlurm stop                              # 停止调度，已启动任务继续运行
@@ -120,11 +122,12 @@ xrun / xbatch / xqueue / xcancel / xinfo
 ```
 
 - 调度器按提交顺序扫描，资源足够就启动；大任务等资源时允许后面的小任务先跑。最多同时运行 32 个任务，可用 `--max-running` 调整。
-- 每个设备槽独占分配，单个任务只使用一个厂商的设备池。自动选择优先尝试 NVIDIA、Ascend、摩尔线程，再尝试 MetaX。多芯片 Ascend 卡按独立计算芯片分配。
+- 每个设备槽独占分配，单个任务只使用一个厂商的设备池。自动选择优先尝试 NVIDIA、Ascend、摩尔线程、MetaX，再尝试 PPU。多芯片 Ascend 卡按独立计算芯片分配。
 - NVIDIA 用 `nvidia-smi` 发现与监测，按 GPU UUID 设置 `CUDA_VISIBLE_DEVICES`，避免 CUDA 与管理工具索引顺序不同。
 - Ascend 用 `npu-smi info -m` 解析映射，按逻辑 ID 设置 `ASCEND_RT_VISIBLE_DEVICES`。兼容 `Chip Logic ID` 和 Ascend950PR 的 `Chip Phy-ID` 列；不会把多芯片卡的物理卡号误当成逻辑号。物理卡号/芯片号仅用于驱动查询。
 - 摩尔线程用 `mthreads-gmi --list-gpus` 发现设备并保存 UUID；通过 `mthreads-gmi` 进程表识别外部占用。任务设置 `MTHREADS_VISIBLE_DEVICES` UUID 和 `MUSA_VISIBLE_DEVICES` 设备序号，显示简写为 `mtt`。
 - MetaX 用 `mx-smi -L` 发现设备并保存 UUID，通过 `mx-smi --show-all-process` 识别外部占用。任务设置设备序号到 `CUDA_VISIBLE_DEVICES` 和 `MACA_VISIBLE_DEVICES`；显示简写为 `mx`。
+- T-Head PPU 用 `ppu-smi --query-ppu` 按 UUID 发现设备，并通过 `--query-compute-apps` 检查外部计算进程。任务将已分配 UUID 写入 `CUDA_VISIBLE_DEVICES`；显示简写为 `ppu`。
 - 每两秒检查驱动报告的外部计算进程；有占用的设备暂不分配，查询失败显示 `unknown` 并暂停分配。单次驱动调用最多等待 3 秒。
 - worker 持有继承的文件锁，调度器重启后通过锁接管任务；不靠裸 PID 判断任务是否存活。退出结果通过原子文件写入。
 - 取消先向进程组发 SIGTERM，一秒后仍未退出则发 SIGKILL。任务主进程结束时清理同组后台子进程，并回收孤儿进程，然后释放设备。
@@ -159,7 +162,7 @@ cargo build --bins --locked
 sudo python3 tests/multiuser.py
 ```
 
-端到端测试通过模拟驱动覆盖 NVIDIA 和 Ascend，验证独占分配、外部占用/查询失败、前台退出码、脚本快照、取消、超时和调度器崩溃接管；权限测试覆盖属主伪造、跨用户查询/读日志/取消、管理员权限和队列隐私。普通 `cargo test` 不需要 root。
+端到端测试通过模拟驱动覆盖 NVIDIA、Ascend 和 PPU，验证独占分配、外部占用/查询失败、前台退出码、脚本快照、取消、超时和调度器崩溃接管；权限测试覆盖属主伪造、跨用户查询/读日志/取消、管理员权限和队列隐私。普通 `cargo test` 不需要 root。
 
 `tests/multiuser.py` 使用现有 `nobody`、`daemon` 两个账户，验证真实 UID/GID/附加组切换、输出文件属主、私有队列及越权拒绝；使用临时目录和 CPU 任务，不修改账户配置。开发时可通过 `XLURM_HOME=/tmp/my-xlurm xlurm daemon --backend none` 启动仅当前账户可访问的非 root 测试实例。
 

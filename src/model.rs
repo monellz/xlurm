@@ -13,10 +13,17 @@ pub enum Kind {
     Mthreads,
     #[value(alias = "mx")]
     Metax,
+    Ppu,
 }
 
 impl Kind {
-    pub const PRIORITY: [Self; 4] = [Self::Nvidia, Self::Ascend, Self::Mthreads, Self::Metax];
+    pub const PRIORITY: [Self; 5] = [
+        Self::Nvidia,
+        Self::Ascend,
+        Self::Mthreads,
+        Self::Metax,
+        Self::Ppu,
+    ];
 }
 
 impl std::fmt::Display for Kind {
@@ -26,6 +33,7 @@ impl std::fmt::Display for Kind {
             Self::Ascend => "asc",
             Self::Mthreads => "mtt",
             Self::Metax => "mx",
+            Self::Ppu => "ppu",
         })
     }
 }

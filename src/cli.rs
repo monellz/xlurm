@@ -19,7 +19,7 @@ const DEFAULT_QUEUE_LIMIT: usize = 100;
     name = "xlurm",
     version,
     propagate_version = true,
-    about = "Minimal multi-user, single-machine GPU / Ascend scheduler"
+    about = "Minimal multi-user, single-machine accelerator scheduler"
 )]
 struct Cli {
     #[command(subcommand)]

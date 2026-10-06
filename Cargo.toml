@@ -2,7 +2,7 @@
 name = "xlurm"
 version = "0.1.0"
 edition = "2024"
-description = "A minimal, multi-user single-machine GPU and Ascend scheduler"
+description = "A minimal, multi-user single-machine accelerator scheduler"
 license = "MIT"
 default-run = "xlurm"
 

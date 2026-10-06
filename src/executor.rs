@@ -284,6 +284,8 @@ fn visible(job: &Job, kind: Kind) -> String {
 fn visible_for_cuda(job: &Job) -> String {
     if job.devices.iter().any(|device| device.kind == Kind::Metax) {
         visible_ids(job, Kind::Metax)
+    } else if job.devices.iter().any(|device| device.kind == Kind::Ppu) {
+        visible(job, Kind::Ppu)
     } else {
         visible(job, Kind::Nvidia)
     }
