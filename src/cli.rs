@@ -735,14 +735,10 @@ fn device_names(devices: &[Device]) -> String {
     groups
         .into_iter()
         .map(|(kind, ids)| {
-            if ids.len() == 1 {
-                format!("{kind}:{}", ids[0])
-            } else {
-                format!(
-                    "{kind}:[{}]",
-                    ids.iter().map(u32::to_string).collect::<Vec<_>>().join(",")
-                )
-            }
+            format!(
+                "{kind}:[{}]",
+                ids.iter().map(u32::to_string).collect::<Vec<_>>().join(",")
+            )
         })
         .collect::<Vec<_>>()
         .join(",")
@@ -874,7 +870,8 @@ mod tests {
         })
         .collect::<Vec<_>>();
         assert_eq!(device_names(&[]), "-");
-        assert_eq!(device_names(&devices[..1]), "nv:2");
+        assert_eq!(device_names(&devices[..1]), "nv:[2]");
+        assert_eq!(device_names(&devices[2..3]), "asc:[1]");
         assert_eq!(device_names(&devices), "nv:[2,0],asc:[1,3]");
     }
 
