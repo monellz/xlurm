@@ -40,7 +40,7 @@ xcancel 3                                # Cancel a task and its process group
 | `xinfo` | Show devices, external usage, and allocations |
 | `sudo xlurm clean` | Remove all logs while the scheduler is stopped and no task is running |
 
-Resource options include `-g/--gpus N` (also `--devices`, default `1`), `-i/--device-ids ID[,ID...]`, and `--device nv|mtt|mx|asc|ppu`; `-n/--name NAME` and `-t/--time-limit SECONDS` are also available. Full backend names `nvidia|mthreads|metax|ascend|ppu` are accepted. `-i` requests exact device IDs, for example `xrun -i 0,2 python train.py`; all IDs must belong to one backend. On a single-backend machine the backend is inferred. If the IDs exist on multiple backends, use `--device` to disambiguate. `-g` may be combined with `-i`, but the count must match; when omitted, the count is inferred from the IDs. `-g 0` still submits a CPU task.
+Resource options include `-g/--gpus N` (also `--devices`, default `1`), `-i/--device-ids ID[,ID...]`, and `--device nv|mtt|mx|asc|ppu|hcu`; `-n/--name NAME` and `-t/--time-limit SECONDS` are also available. Full backend names `nvidia|mthreads|metax|ascend|ppu|hcu` are accepted. `-i` requests exact device IDs, for example `xrun -i 0,2 python train.py`; all IDs must belong to one backend. On a single-backend machine the backend is inferred. If the IDs exist on multiple backends, use `--device` to disambiguate. `-g` may be combined with `-i`, but the count must match; when omitted, the count is inferred from the IDs. `-g 0` still submits a CPU task.
 
 ```bash
 xrun --device ascend -g 2 python train_npu.py
@@ -124,12 +124,13 @@ xrun / xbatch / xqueue / xcancel / xinfo
 ```
 
 - The scheduler scans tasks in submission order and starts tasks when resources are available; a later small task may run while a larger task waits. At most 32 tasks run at once, configurable with `--max-running`.
-- Each device slot is allocated exclusively, and a task uses only one vendor's device pool. Automatic selection tries NVIDIA, then Ascend, Moore Threads, MetaX, and PPU. Multi-chip Ascend cards are allocated by individual compute chip.
+- Each device slot is allocated exclusively, and a task uses only one vendor's device pool. Automatic selection tries NVIDIA, then Ascend, Moore Threads, MetaX, PPU, and HCU. Multi-chip Ascend cards are allocated by individual compute chip.
 - NVIDIA devices are discovered and monitored with `nvidia-smi`; `CUDA_VISIBLE_DEVICES` is set by GPU UUID to avoid differences between CUDA and management-tool index order.
 - Ascend devices use `npu-smi info -m` to parse mappings, and `ASCEND_RT_VISIBLE_DEVICES` is set by logical ID. Both `Chip Logic ID` and the `Chip Phy-ID` column used by Ascend950PR are supported; physical card numbers are not mistaken for logical IDs on multi-chip cards. Physical card and chip numbers are used only for driver queries. Devices whose health is not `OK` are shown as `unhealthy` and excluded from allocation; failed health queries are shown as `unknown` and also pause allocation.
 - Moore Threads devices are discovered by UUID through `mthreads-gmi --list-gpus`; external process use is read from its process table. Jobs receive allocated UUIDs in `MTHREADS_VISIBLE_DEVICES` and device indices in `MUSA_VISIBLE_DEVICES`. The display label is `mtt`.
 - MetaX devices are discovered by UUID through `mx-smi -L`; `mx-smi --show-all-process` reports external use. Jobs receive allocated device indices in `CUDA_VISIBLE_DEVICES` and `MACA_VISIBLE_DEVICES`. The display label is `mx`.
 - T-Head PPU devices are discovered by UUID through `ppu-smi --query-ppu`; external compute processes are checked through `--query-compute-apps`. Jobs receive allocated UUIDs in `CUDA_VISIBLE_DEVICES`; the display label is `ppu`.
+- Hygon HCU devices are discovered by Unique ID through `hy-smi`; KFD process use and health are checked through `--showpids` and `--healthcheck`. Unhealthy devices are excluded and failed probes pause allocation. Jobs receive logical IDs in `HIP_VISIBLE_DEVICES`, `ROCR_VISIBLE_DEVICES`, and `CUDA_VISIBLE_DEVICES`; the display label is `hcu`.
 - External compute processes reported by the driver are checked every two seconds. Occupied devices are not allocated; query failures are shown as `unknown` and pause allocation. Each driver call waits at most three seconds.
 - Workers hold inherited file locks, allowing the scheduler to take over tasks after a restart without relying on bare PIDs to determine liveness. Exit results are written atomically.
 - Cancellation first sends SIGTERM to the process group, then sends SIGKILL if it is still running after one second. When the main task process exits, the same group is cleaned up, orphan processes are reaped, and devices are released.

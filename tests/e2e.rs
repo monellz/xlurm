@@ -572,6 +572,55 @@ fn ppu_devices_are_discovered_exclusively_and_fail_closed() {
 }
 
 #[test]
+fn hcu_devices_are_discovered_monitored_and_exposed_by_logical_id() {
+    let mut h = Harness::new("hcu", 1);
+    h.drivers();
+    symlink(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hy-smi"),
+        h.dir.path().join("bin/hy-smi"),
+    )
+    .unwrap();
+    fs::write(h.dir.path().join("hcu-busy"), "").unwrap();
+    h.start();
+
+    let devices: Vec<Value> = serde_json::from_slice(&h.run("xinfo", &["--json"]).stdout).unwrap();
+    assert_eq!(devices.len(), 2);
+    assert_eq!(devices[0]["device"]["visible"], "hcu-unique-0");
+    assert_eq!(devices[0]["status"], "idle");
+    assert_eq!(devices[1]["status"], "busy");
+
+    let run = h.run(
+        "xrun",
+        &[
+            "--device", "hcu", "-i", "0", "--", "sh", "-c",
+            "printf '%s|%s|%s' \"$HIP_VISIBLE_DEVICES\" \"$ROCR_VISIBLE_DEVICES\" \"$CUDA_VISIBLE_DEVICES\"",
+        ],
+    );
+    assert_eq!(String::from_utf8(run.stdout).unwrap(), "0|0|0");
+
+    fs::write(h.dir.path().join("hcu-unhealthy"), "").unwrap();
+    let waiting = h.submit(&["--device", "hcu", "-i", "1", "--wrap", "true"]);
+    assert_eq!(h.job(waiting)["state"], "PENDING");
+
+    fs::remove_file(h.dir.path().join("hcu-unhealthy")).unwrap();
+    fs::write(h.dir.path().join("hcu-health-error"), "").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let devices: Vec<Value> =
+            serde_json::from_slice(&h.run("xinfo", &["--json"]).stdout).unwrap();
+        if devices.iter().all(|device| device["status"] == "unknown") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "health probe failure not observed: {devices:?}"
+        );
+        sleep(Duration::from_millis(50));
+    }
+    assert_eq!(h.job(waiting)["state"], "PENDING");
+}
+
+#[test]
 fn cancellation_and_timeout_kill_process_groups() {
     let mut h = Harness::new("none", 2);
     h.start();

@@ -171,6 +171,8 @@ fn execute(paths: &Paths, job: &Job) -> Result<Outcome> {
         .env("MUSA_VISIBLE_DEVICES", visible_ids(job, Kind::Mthreads))
         .env("MTHREADS_VISIBLE_DEVICES", visible(job, Kind::Mthreads))
         .env("MACA_VISIBLE_DEVICES", visible_ids(job, Kind::Metax))
+        .env("HIP_VISIBLE_DEVICES", visible_ids(job, Kind::Hcu))
+        .env("ROCR_VISIBLE_DEVICES", visible_ids(job, Kind::Hcu))
         .env_remove("ASCEND_DEVICE_ID")
         .stdin(Stdio::null())
         .process_group(0);
@@ -286,6 +288,8 @@ fn visible_for_cuda(job: &Job) -> String {
         visible_ids(job, Kind::Metax)
     } else if job.devices.iter().any(|device| device.kind == Kind::Ppu) {
         visible(job, Kind::Ppu)
+    } else if job.devices.iter().any(|device| device.kind == Kind::Hcu) {
+        visible_ids(job, Kind::Hcu)
     } else {
         visible(job, Kind::Nvidia)
     }

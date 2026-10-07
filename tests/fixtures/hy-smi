@@ -1,0 +1,24 @@
+#!/bin/sh
+case "$*" in
+  *--showuniqueid*)
+    if [ -e "$TEST_ROOT/hcu-discovery-error" ]; then exit 1; fi
+    printf '{"card0":{"Unique ID":"hcu-unique-0"},"card1":{"Unique ID":"hcu-unique-1"}}\n'
+    ;;
+  *--showpids*)
+    if [ -e "$TEST_ROOT/hcu-probe-error" ]; then exit 1; fi
+    if [ -e "$TEST_ROOT/hcu-busy" ]; then
+      printf '{"card0":{},"card1":{"pid":"1234"}}\n'
+    else
+      printf '{"card0":{},"card1":{}}\n'
+    fi
+    ;;
+  *--healthcheck*)
+    if [ -e "$TEST_ROOT/hcu-health-error" ]; then exit 1; fi
+    if [ -e "$TEST_ROOT/hcu-unhealthy" ]; then
+      printf 'HCU[0] : Bus Id : 0000:01:00.0 : Healthy\nHCU[1] : Bus Id : 0000:02:00.0 : Critical\n'
+    else
+      printf 'HCU[0] : Bus Id : 0000:01:00.0 : Healthy\nHCU[1] : Bus Id : 0000:02:00.0 : Healthy\n'
+    fi
+    ;;
+  *) exit 1 ;;
+esac

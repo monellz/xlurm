@@ -38,7 +38,7 @@ xcancel 3                                # 取消任务及其进程组
 | `xinfo` | 显示设备、外部占用、分配情况 |
 | `sudo xlurm clean` | 调度器已停止且没有运行中任务时删除全部日志 |
 
-任务资源选项包括 `-g/--gpus N`（也可写 `--devices`，默认 1）、`-i/--device-ids ID[,ID...]` 和 `--device nv|mtt|mx|asc|ppu`；另有 `-n/--name NAME`、`-t/--time-limit SECONDS`。也兼容完整后端名称 `nvidia|mthreads|metax|ascend|ppu`。`-i` 按设备编号精确申请，例如 `xrun -i 0,2 python train.py`；编号必须属于同一后端。通常单后端机器会自动识别，编号在多个后端都存在时用 `--device` 消歧。`-g` 可与 `-i` 同时指定，但数量必须一致；只写 `-i` 时数量由编号个数决定。`-g 0` 仍提交 CPU 任务。
+任务资源选项包括 `-g/--gpus N`（也可写 `--devices`，默认 1）、`-i/--device-ids ID[,ID...]` 和 `--device nv|mtt|mx|asc|ppu|hcu`；另有 `-n/--name NAME`、`-t/--time-limit SECONDS`。也兼容完整后端名称 `nvidia|mthreads|metax|ascend|ppu|hcu`。`-i` 按设备编号精确申请，例如 `xrun -i 0,2 python train.py`；编号必须属于同一后端。通常单后端机器会自动识别，编号在多个后端都存在时用 `--device` 消歧。`-g` 可与 `-i` 同时指定，但数量必须一致；只写 `-i` 时数量由编号个数决定。`-g 0` 仍提交 CPU 任务。
 
 ```bash
 xrun --device ascend -g 2 python train_npu.py
@@ -122,12 +122,13 @@ xrun / xbatch / xqueue / xcancel / xinfo
 ```
 
 - 调度器按提交顺序扫描，资源足够就启动；大任务等资源时允许后面的小任务先跑。最多同时运行 32 个任务，可用 `--max-running` 调整。
-- 每个设备槽独占分配，单个任务只使用一个厂商的设备池。自动选择优先尝试 NVIDIA、Ascend、摩尔线程、MetaX，再尝试 PPU。多芯片 Ascend 卡按独立计算芯片分配。
+- 每个设备槽独占分配，单个任务只使用一个厂商的设备池。自动选择优先尝试 NVIDIA、Ascend、摩尔线程、MetaX、PPU，再尝试 HCU。多芯片 Ascend 卡按独立计算芯片分配。
 - NVIDIA 用 `nvidia-smi` 发现与监测，按 GPU UUID 设置 `CUDA_VISIBLE_DEVICES`，避免 CUDA 与管理工具索引顺序不同。
 - Ascend 用 `npu-smi info -m` 解析映射，按逻辑 ID 设置 `ASCEND_RT_VISIBLE_DEVICES`。兼容 `Chip Logic ID` 和 Ascend950PR 的 `Chip Phy-ID` 列；不会把多芯片卡的物理卡号误当成逻辑号。物理卡号/芯片号仅用于驱动查询。健康状态不是 `OK` 的设备显示为 `unhealthy`，不参与分配；健康查询失败显示为 `unknown`，同样暂停分配。
 - 摩尔线程用 `mthreads-gmi --list-gpus` 发现设备并保存 UUID；通过 `mthreads-gmi` 进程表识别外部占用。任务设置 `MTHREADS_VISIBLE_DEVICES` UUID 和 `MUSA_VISIBLE_DEVICES` 设备序号，显示简写为 `mtt`。
 - MetaX 用 `mx-smi -L` 发现设备并保存 UUID，通过 `mx-smi --show-all-process` 识别外部占用。任务设置设备序号到 `CUDA_VISIBLE_DEVICES` 和 `MACA_VISIBLE_DEVICES`；显示简写为 `mx`。
 - T-Head PPU 用 `ppu-smi --query-ppu` 按 UUID 发现设备，并通过 `--query-compute-apps` 检查外部计算进程。任务将已分配 UUID 写入 `CUDA_VISIBLE_DEVICES`；显示简写为 `ppu`。
+- Hygon HCU 用 `hy-smi` 按 Unique ID 发现设备，通过 `--showpids` 和 `--healthcheck` 检查 KFD 进程占用与健康状态。不健康设备不参与分配，探测失败会暂停分配。任务按逻辑编号设置 `HIP_VISIBLE_DEVICES`、`ROCR_VISIBLE_DEVICES` 和 `CUDA_VISIBLE_DEVICES`；显示简写为 `hcu`。
 - 每两秒检查驱动报告的外部计算进程；有占用的设备暂不分配，查询失败显示 `unknown` 并暂停分配。单次驱动调用最多等待 3 秒。
 - worker 持有继承的文件锁，调度器重启后通过锁接管任务；不靠裸 PID 判断任务是否存活。退出结果通过原子文件写入。
 - 取消先向进程组发 SIGTERM，一秒后仍未退出则发 SIGKILL。任务主进程结束时清理同组后台子进程，并回收孤儿进程，然后释放设备。
