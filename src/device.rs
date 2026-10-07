@@ -125,7 +125,9 @@ impl Inventory {
                 &["--query-compute-apps=uuid,pid", "--format=csv"],
             )
         });
+        let mut ascend_health = HashMap::new();
         for device in &self.devices {
+            let mut unhealthy = false;
             let idle = match device.kind {
                 Kind::Nvidia => nvidia_busy
                     .as_ref()
@@ -136,15 +138,27 @@ impl Inventory {
                     })
                     .map(|text| !text.lines().any(|line| line.trim() == device.visible)),
                 Kind::Ascend => {
-                    let npu = device.npu.unwrap().to_string();
+                    let npu_id = device.npu.unwrap();
+                    let npu = npu_id.to_string();
                     let chip = device.chip.map(|chip| chip.to_string());
                     let mut args = vec!["info", "-t", "proc-mem", "-i", &npu];
                     if let Some(chip) = &chip {
                         args.extend(["-c", chip]);
                     }
-                    output(&self.ascend, &args)
+                    let process_idle = output(&self.ascend, &args)
                         .ok()
-                        .and_then(|text| ascend_idle(&text))
+                        .and_then(|text| ascend_idle(&text));
+                    let healthy = *ascend_health.entry(npu_id).or_insert_with(|| {
+                        output(&self.ascend, &["info", "-t", "health", "-i", &npu])
+                            .ok()
+                            .and_then(|text| ascend_healthy(&text))
+                    });
+                    unhealthy = healthy == Some(false);
+                    match healthy {
+                        Some(false) => Some(false),
+                        Some(true) => process_idle,
+                        None => None,
+                    }
                 }
                 Kind::Mthreads => mthreads_busy
                     .as_ref()
@@ -162,15 +176,16 @@ impl Inventory {
                     .and_then(|text| ppu_busy_devices(text))
                     .map(|busy| !busy.contains(&device.visible)),
             };
-            self.status.insert(
-                device.key(),
+            let status = if unhealthy {
+                "unhealthy"
+            } else {
                 match idle {
                     Some(true) => "idle",
                     Some(false) => "busy",
                     None => "unknown",
                 }
-                .into(),
-            );
+            };
+            self.status.insert(device.key(), status.into());
         }
     }
 }
@@ -184,6 +199,21 @@ fn ascend_idle(text: &str) -> Option<bool> {
     } else {
         None
     }
+}
+
+fn ascend_healthy(text: &str) -> Option<bool> {
+    let mut found_status = false;
+    for (key, value) in text.lines().filter_map(|line| line.split_once(':')) {
+        let key = key.trim();
+        if !key.eq_ignore_ascii_case("health") && !key.eq_ignore_ascii_case("health status") {
+            continue;
+        }
+        found_status = true;
+        if !value.trim().eq_ignore_ascii_case("ok") {
+            return Some(false);
+        }
+    }
+    found_status.then_some(true)
 }
 
 fn locate(program: &str, fallbacks: &[&str]) -> PathBuf {
@@ -643,5 +673,14 @@ mod tests {
             Some(false)
         );
         assert_eq!(ascend_idle("Failed to query device"), None);
+    }
+
+    #[test]
+    fn ascend_health_requires_every_reported_health_status_to_be_ok() {
+        assert_eq!(ascend_healthy("Health : OK\nHealth : OK\n"), Some(true));
+        assert_eq!(ascend_healthy("Health Status : Alarm\n"), Some(false));
+        assert_eq!(ascend_healthy("Health : Critical\n"), Some(false));
+        assert_eq!(ascend_healthy("Health : OK\nHealth : Alarm\n"), Some(false));
+        assert_eq!(ascend_healthy("health query failed"), None);
     }
 }

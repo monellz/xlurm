@@ -124,7 +124,7 @@ xrun / xbatch / xqueue / xcancel / xinfo
 - 调度器按提交顺序扫描，资源足够就启动；大任务等资源时允许后面的小任务先跑。最多同时运行 32 个任务，可用 `--max-running` 调整。
 - 每个设备槽独占分配，单个任务只使用一个厂商的设备池。自动选择优先尝试 NVIDIA、Ascend、摩尔线程、MetaX，再尝试 PPU。多芯片 Ascend 卡按独立计算芯片分配。
 - NVIDIA 用 `nvidia-smi` 发现与监测，按 GPU UUID 设置 `CUDA_VISIBLE_DEVICES`，避免 CUDA 与管理工具索引顺序不同。
-- Ascend 用 `npu-smi info -m` 解析映射，按逻辑 ID 设置 `ASCEND_RT_VISIBLE_DEVICES`。兼容 `Chip Logic ID` 和 Ascend950PR 的 `Chip Phy-ID` 列；不会把多芯片卡的物理卡号误当成逻辑号。物理卡号/芯片号仅用于驱动查询。
+- Ascend 用 `npu-smi info -m` 解析映射，按逻辑 ID 设置 `ASCEND_RT_VISIBLE_DEVICES`。兼容 `Chip Logic ID` 和 Ascend950PR 的 `Chip Phy-ID` 列；不会把多芯片卡的物理卡号误当成逻辑号。物理卡号/芯片号仅用于驱动查询。健康状态不是 `OK` 的设备显示为 `unhealthy`，不参与分配；健康查询失败显示为 `unknown`，同样暂停分配。
 - 摩尔线程用 `mthreads-gmi --list-gpus` 发现设备并保存 UUID；通过 `mthreads-gmi` 进程表识别外部占用。任务设置 `MTHREADS_VISIBLE_DEVICES` UUID 和 `MUSA_VISIBLE_DEVICES` 设备序号，显示简写为 `mtt`。
 - MetaX 用 `mx-smi -L` 发现设备并保存 UUID，通过 `mx-smi --show-all-process` 识别外部占用。任务设置设备序号到 `CUDA_VISIBLE_DEVICES` 和 `MACA_VISIBLE_DEVICES`；显示简写为 `mx`。
 - T-Head PPU 用 `ppu-smi --query-ppu` 按 UUID 发现设备，并通过 `--query-compute-apps` 检查外部计算进程。任务将已分配 UUID 写入 `CUDA_VISIBLE_DEVICES`；显示简写为 `ppu`。

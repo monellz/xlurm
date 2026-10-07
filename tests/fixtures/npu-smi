@@ -1,7 +1,20 @@
 #!/bin/sh
 if [ "$2" = '-m' ]; then
   printf 'NPU ID  Chip ID  Chip Logic ID  Chip Name\n4 0 2 Ascend910B\n4 1 3 Ascend910B\n4 2 - Mcu\n'
+elif [ "$2" = '-t' ] && [ "$3" = 'health' ]; then
+  echo "$*" >> "$TEST_ROOT/npu-queries"
+  if [ -e "$TEST_ROOT/npu-health-error" ]; then exit 1; fi
+  if [ -e "$TEST_ROOT/npu-health" ]; then
+    printf 'Health Status : %s\n' "$(cat "$TEST_ROOT/npu-health")"
+  else
+    printf 'Health Status : OK\n'
+  fi
 else
   echo "$*" >> "$TEST_ROOT/npu-queries"
-  echo 'No running processes found in NPU 4'
+  if [ -e "$TEST_ROOT/probe-error" ]; then exit 1; fi
+  if [ -e "$TEST_ROOT/npu-busy" ]; then
+    echo 'Process id:123 Process name:train'
+  else
+    echo 'No running processes found in NPU 4'
+  fi
 fi

@@ -405,6 +405,60 @@ fn both_vendors_are_exclusive_and_external_busy_or_unknown_devices_wait() {
 }
 
 #[test]
+fn ascend_alarm_and_critical_devices_wait_until_health_is_ok() {
+    for health in ["Alarm", "Critical"] {
+        let mut h = Harness::new("ascend", 1);
+        h.drivers();
+        fs::write(h.dir.path().join("npu-health"), health).unwrap();
+        h.start();
+
+        let devices: Vec<Value> =
+            serde_json::from_slice(&h.run("xinfo", &["--json"]).stdout).unwrap();
+        assert_eq!(devices.len(), 2);
+        assert!(devices.iter().all(|device| device["status"] == "unhealthy"));
+
+        let job = h.submit(&["--device", "ascend", "-i", "2", "--wrap", "true"]);
+        assert_eq!(h.job(job)["state"], "PENDING");
+
+        fs::remove_file(h.dir.path().join("npu-health")).unwrap();
+        let completed = h.wait_state(job, "COMPLETED");
+        assert_eq!(completed["devices"][0]["visible"], "2");
+    }
+}
+
+#[test]
+fn ascend_health_query_failure_is_unknown_and_waits() {
+    let mut h = Harness::new("ascend", 1);
+    h.drivers();
+    fs::write(h.dir.path().join("npu-health-error"), "").unwrap();
+    fs::write(h.dir.path().join("npu-busy"), "").unwrap();
+    h.start();
+
+    let devices: Vec<Value> = serde_json::from_slice(&h.run("xinfo", &["--json"]).stdout).unwrap();
+    assert!(devices.iter().all(|device| device["status"] == "unknown"));
+    let job = h.submit(&["--device", "ascend", "-i", "2", "--wrap", "true"]);
+    assert_eq!(h.job(job)["state"], "PENDING");
+
+    fs::remove_file(h.dir.path().join("npu-health-error")).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let devices: Vec<Value> =
+            serde_json::from_slice(&h.run("xinfo", &["--json"]).stdout).unwrap();
+        if devices.iter().all(|device| device["status"] == "busy") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "health recovery was not observed: {devices:?}"
+        );
+        sleep(Duration::from_millis(50));
+    }
+
+    fs::remove_file(h.dir.path().join("npu-busy")).unwrap();
+    assert_eq!(h.wait_state(job, "COMPLETED")["state"], "COMPLETED");
+}
+
+#[test]
 fn explicit_device_ids_select_exact_devices_and_validate_counts() {
     let mut h = Harness::new("auto", 2);
     h.drivers();
