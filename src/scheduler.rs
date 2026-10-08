@@ -3,6 +3,7 @@ use crate::executor::{Executor, failure};
 use crate::model::*;
 use crate::storage::{Paths, read_json, write_json};
 use anyhow::{Context, Result, ensure};
+use std::cmp::Reverse;
 use std::collections::HashSet;
 use std::fs;
 
@@ -228,14 +229,20 @@ impl<E: Executor> Scheduler<E> {
             .iter()
             .filter(|j| j.state == State::Running)
             .count();
-        for i in 0..self.store.jobs.len() {
+        let mut pending: Vec<_> = self
+            .store
+            .jobs
+            .iter()
+            .enumerate()
+            .filter(|(_, job)| job.state == State::Pending)
+            .map(|(index, _)| index)
+            .collect();
+        pending.sort_by_key(|&index| Reverse(self.store.jobs[index].spec.count));
+        for i in pending {
             if running >= self.max_running {
                 break;
             }
             let job = &self.store.jobs[i];
-            if job.state != State::Pending {
-                continue;
-            }
             let Some(devices) = allocate(&job.spec, &self.inventory.devices, &reserved) else {
                 continue;
             };
@@ -350,7 +357,25 @@ fn matching_kinds(spec: &Submission, devices: &[Device]) -> Vec<Kind> {
 mod tests {
     use super::*;
     use crate::device::Backend;
-    use crate::executor::ProcessExecutor;
+    use crate::executor::{Executor, ProcessExecutor};
+    use std::cell::RefCell;
+
+    struct RecordingExecutor(RefCell<Vec<u64>>);
+
+    impl Executor for RecordingExecutor {
+        fn start(&mut self, job: &Job) -> Result<()> {
+            self.0.borrow_mut().push(job.id);
+            Ok(())
+        }
+
+        fn poll(&mut self, _id: u64) -> Result<Option<Outcome>> {
+            Ok(None)
+        }
+
+        fn cancel(&mut self, _id: u64) -> Result<()> {
+            Ok(())
+        }
+    }
 
     fn history_scheduler(paths: &Paths) -> Scheduler<ProcessExecutor> {
         paths.initialize().unwrap();
@@ -393,6 +418,49 @@ mod tests {
                 error: None,
             }),
         }
+    }
+
+    #[test]
+    fn scheduler_starts_jobs_with_more_requested_devices_first() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = Paths(directory.path().join("state"));
+        paths.initialize().unwrap();
+        let mut inventory = Inventory::discover(Backend::None).unwrap();
+        inventory.devices = (0..3)
+            .map(|id| Device {
+                kind: Kind::Nvidia,
+                id,
+                name: format!("gpu-{id}"),
+                visible: format!("GPU-{id}"),
+                npu: None,
+                chip: None,
+            })
+            .collect();
+        inventory.status.extend(
+            inventory
+                .devices
+                .iter()
+                .map(|device| (device.key(), "idle".into())),
+        );
+        let executor = RecordingExecutor(RefCell::new(vec![]));
+        let mut scheduler = Scheduler {
+            store: Store::default(),
+            inventory,
+            executor,
+            paths,
+            max_running: 2,
+        };
+        let mut single_device_job = history_job(1, State::Pending, 0);
+        single_device_job.spec.count = 1;
+        let mut multi_device_job = history_job(2, State::Pending, 0);
+        multi_device_job.spec.count = 2;
+        scheduler.store.jobs = vec![single_device_job, multi_device_job];
+
+        scheduler.tick().unwrap();
+
+        assert_eq!(*scheduler.executor.0.borrow(), vec![2, 1]);
+        assert_eq!(scheduler.get(2).unwrap().devices.len(), 2);
+        assert_eq!(scheduler.get(1).unwrap().devices.len(), 1);
     }
 
     #[test]
