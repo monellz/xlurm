@@ -685,6 +685,9 @@ fn visible_queue_jobs(jobs: Vec<JobSummary>, all: bool) -> Vec<JobSummary> {
         .take(DEFAULT_QUEUE_LIMIT)
         .collect();
     jobs.reverse();
+    if !all {
+        jobs.sort_by_key(|job| job.state != State::Running);
+    }
     jobs
 }
 
@@ -900,6 +903,18 @@ mod tests {
         assert_eq!(visible.len(), 100);
         assert_eq!(visible.first().unwrap().id, 11);
         assert_eq!(visible.last().unwrap().id, 110);
+
+        let mixed = vec![
+            summary(1, State::Pending),
+            summary(2, State::Running),
+            summary(3, State::Pending),
+            summary(4, State::Running),
+        ];
+        let visible = visible_queue_jobs(mixed, false);
+        assert_eq!(
+            visible.iter().map(|job| job.id).collect::<Vec<_>>(),
+            [2, 4, 1, 3]
+        );
 
         let jobs = (1..=202)
             .map(|id| {
