@@ -107,6 +107,11 @@ impl<E: Executor> Scheduler<E> {
         );
         ensure!(spec.cwd.is_dir(), "working directory does not exist");
         ensure!(spec.time_limit != Some(0), "time-limit must be positive");
+        ensure!(
+            spec.exclude_device_ids.iter().collect::<HashSet<_>>().len()
+                == spec.exclude_device_ids.len(),
+            "excluded device IDs must not contain duplicates"
+        );
         if let Some(ids) = &spec.device_ids {
             ensure!(!ids.is_empty(), "device IDs must not be empty");
             ensure!(
@@ -116,6 +121,10 @@ impl<E: Executor> Scheduler<E> {
             ensure!(
                 ids.iter().collect::<HashSet<_>>().len() == ids.len(),
                 "device IDs must not contain duplicates"
+            );
+            ensure!(
+                spec.exclude_device_ids.is_empty(),
+                "-x cannot be combined with exact -i device IDs"
             );
             let kinds = matching_kinds(&spec, &self.inventory.devices);
             ensure!(
@@ -326,7 +335,11 @@ fn allocate(
         }
         let selected: Vec<_> = devices
             .iter()
-            .filter(|d| d.kind == kind && !reserved.contains(&d.key()))
+            .filter(|d| {
+                d.kind == kind
+                    && !reserved.contains(&d.key())
+                    && !spec.exclude_device_ids.contains(&d.id)
+            })
             .take(spec.count)
             .cloned()
             .collect();
@@ -403,6 +416,7 @@ mod tests {
                 name: "history".into(),
                 count: 0,
                 device_ids: None,
+                exclude_device_ids: vec![],
                 kind: None,
                 time_limit: None,
                 script: None,
@@ -576,6 +590,7 @@ mod tests {
             name: "test".into(),
             count: 2,
             device_ids: None,
+            exclude_device_ids: vec![],
             kind: None,
             time_limit: None,
             script: None,

@@ -40,13 +40,14 @@ xcancel 3                                # Cancel a task and its process group
 | `xinfo` | Show devices, external usage, and allocations |
 | `sudo xlurm clean` | Remove all logs while the scheduler is stopped and no task is running |
 
-Resource options include `-g/--gpus N` (also `--devices`, default `1`), `-i/--device-ids ID[,ID...]`, and `--device nv|mtt|mx|asc|ppu|hcu`; `-n/--name NAME` and `-t/--time-limit SECONDS` are also available. Full backend names `nvidia|mthreads|metax|ascend|ppu|hcu` are accepted. `-i` requests exact device IDs, for example `xrun -i 0,2 python train.py`; all IDs must belong to one backend. On a single-backend machine the backend is inferred. If the IDs exist on multiple backends, use `--device` to disambiguate. `-g` may be combined with `-i`, but the count must match; when omitted, the count is inferred from the IDs. `-g 0` still submits a CPU task.
+Resource options include `-g/--gpus N` (also `--devices`, default `1`), `-i/--device-ids ID[,ID...]`, `-x/--exclude-device-ids ID[,ID...]`, and `--device nv|mtt|mx|asc|ppu|hcu`; `-n/--name NAME` and `-t/--time-limit SECONDS` are also available. Full backend names `nvidia|mthreads|metax|ascend|ppu|hcu` are accepted. `-i` requests exact device IDs, for example `xrun -i 0,2 python train.py`; all IDs must belong to one backend. On a single-backend machine the backend is inferred. If the IDs exist on multiple backends, use `--device` to disambiguate. `-x` excludes device IDs from automatic allocation, for example `xrun -x 0,2 -g 1 python train.py`; it cannot be combined with `-i`. `-g` may be combined with `-i`, but the count must match; when omitted, the count is inferred from the IDs. `-g 0` still submits a CPU task.
 
 ```bash
 xrun --device ascend -g 2 python train_npu.py
 xrun --device ppu -g 1 python train.py
 xrun --device nvidia -g 1 -t 3600 python train.py --epochs 10
 xrun -i 0,2 -g 2 python train.py
+xrun --device nvidia -x 0,2 -g 1 python train.py
 xrun -g 0 bash -c 'echo hello; exit 7'     # xrun also returns 7
 xbatch --device ascend -g 2 train.sh --epochs 10
 xbatch -g 1 --wrap 'python prepare.py && python train.py'

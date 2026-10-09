@@ -77,6 +77,9 @@ struct Resources {
     /// Exact device IDs, such as -i 0,2.
     #[arg(short = 'i', long = "device-ids", value_delimiter = ',')]
     device_ids: Vec<u32>,
+    /// Exclude device IDs from automatic allocation, such as -x 0,2.
+    #[arg(short = 'x', long = "exclude-device-ids", value_delimiter = ',')]
+    exclude_device_ids: Vec<u32>,
     /// Restrict the vendor; otherwise use the first pool that fits.
     #[arg(long, value_enum)]
     device: Option<Kind>,
@@ -321,6 +324,15 @@ fn submission(
         resources.time_limit != Some(0),
         "time-limit must be positive"
     );
+    ensure!(
+        resources
+            .exclude_device_ids
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            == resources.exclude_device_ids.len(),
+        "excluded device IDs must not contain duplicates"
+    );
     let device_ids = if resources.device_ids.is_empty() {
         None
     } else {
@@ -341,6 +353,10 @@ fn submission(
         );
         Some(resources.device_ids)
     };
+    ensure!(
+        device_ids.is_none() || resources.exclude_device_ids.is_empty(),
+        "-x cannot be combined with exact -i device IDs"
+    );
     let count = device_ids
         .as_ref()
         .map_or_else(|| resources.gpus.unwrap_or(1), Vec::len);
@@ -353,6 +369,7 @@ fn submission(
         env: std::env::vars().collect(),
         count,
         device_ids,
+        exclude_device_ids: resources.exclude_device_ids,
         kind: resources.device,
         time_limit: resources.time_limit,
         script,

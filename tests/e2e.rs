@@ -516,6 +516,36 @@ fn explicit_device_ids_select_exact_devices_and_validate_counts() {
 }
 
 #[test]
+fn excluded_device_ids_are_skipped_during_automatic_allocation() {
+    let mut h = Harness::new("ascend", 1);
+    h.drivers();
+    h.start();
+
+    let output = h.run(
+        "xrun",
+        &[
+            "-x",
+            "2",
+            "-g",
+            "1",
+            "--",
+            "sh",
+            "-c",
+            "printf '%s|%s' \"$ASCEND_RT_VISIBLE_DEVICES\" \"$ASCEND_DEVICE_ID\"",
+        ],
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "3|0");
+
+    let conflict = h
+        .command("xrun")
+        .args(["-x", "2", "-i", "3", "--", "true"])
+        .output()
+        .unwrap();
+    assert!(!conflict.status.success());
+    assert!(String::from_utf8_lossy(&conflict.stderr).contains("cannot be combined"));
+}
+
+#[test]
 fn ppu_devices_are_discovered_exclusively_and_fail_closed() {
     let mut h = Harness::new("ppu", 2);
     h.drivers();

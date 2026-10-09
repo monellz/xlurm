@@ -243,6 +243,7 @@ mod tests {
             name: "public-name".into(),
             count: 0,
             device_ids: None,
+            exclude_device_ids: vec![],
             kind: None,
             time_limit: None,
             script: None,

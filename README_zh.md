@@ -38,13 +38,14 @@ xcancel 3                                # 取消任务及其进程组
 | `xinfo` | 显示设备、外部占用、分配情况 |
 | `sudo xlurm clean` | 调度器已停止且没有运行中任务时删除全部日志 |
 
-任务资源选项包括 `-g/--gpus N`（也可写 `--devices`，默认 1）、`-i/--device-ids ID[,ID...]` 和 `--device nv|mtt|mx|asc|ppu|hcu`；另有 `-n/--name NAME`、`-t/--time-limit SECONDS`。也兼容完整后端名称 `nvidia|mthreads|metax|ascend|ppu|hcu`。`-i` 按设备编号精确申请，例如 `xrun -i 0,2 python train.py`；编号必须属于同一后端。通常单后端机器会自动识别，编号在多个后端都存在时用 `--device` 消歧。`-g` 可与 `-i` 同时指定，但数量必须一致；只写 `-i` 时数量由编号个数决定。`-g 0` 仍提交 CPU 任务。
+任务资源选项包括 `-g/--gpus N`（也可写 `--devices`，默认 1）、`-i/--device-ids ID[,ID...]`、`-x/--exclude-device-ids ID[,ID...]` 和 `--device nv|mtt|mx|asc|ppu|hcu`；另有 `-n/--name NAME`、`-t/--time-limit SECONDS`。也兼容完整后端名称 `nvidia|mthreads|metax|ascend|ppu|hcu`。`-i` 按设备编号精确申请，例如 `xrun -i 0,2 python train.py`；编号必须属于同一后端。通常单后端机器会自动识别，编号在多个后端都存在时用 `--device` 消歧。`-x` 从自动分配中排除设备编号，例如 `xrun --device nvidia -x 0,2 -g 1 python train.py`；不能与精确申请 `-i` 同时使用。`-g` 可与 `-i` 同时指定，但数量必须一致；只写 `-i` 时数量由编号个数决定。`-g 0` 仍提交 CPU 任务。
 
 ```bash
 xrun --device ascend -g 2 python train_npu.py
 xrun --device ppu -g 1 python train.py
 xrun --device nvidia -g 1 -t 3600 python train.py --epochs 10
 xrun -i 0,2 -g 2 python train.py
+xrun --device nvidia -x 0,2 -g 1 python train.py
 xrun -g 0 bash -c 'echo hello; exit 7'     # xrun 也返回 7
 xbatch --device ascend -g 2 train.sh --epochs 10
 xbatch -g 1 --wrap 'python prepare.py && python train.py'

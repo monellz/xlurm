@@ -68,6 +68,8 @@ pub struct Submission {
     pub count: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_ids: Option<Vec<u32>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude_device_ids: Vec<u32>,
     pub kind: Option<Kind>,
     pub time_limit: Option<u64>,
     /// Batch scripts are snapshotted at submission, not read when dequeued.
