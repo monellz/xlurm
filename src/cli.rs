@@ -36,6 +36,10 @@ enum Action {
     Stop,
     /// Restart the scheduler; refuse while any job is running.
     Restart(DaemonArgs),
+    /// Disable devices for new allocations without stopping running jobs.
+    Exclude(DeviceIdsArgs),
+    /// Re-enable devices previously excluded from scheduling.
+    Include(DeviceIdsArgs),
     /// Remove all logs while the scheduler is stopped and no job is running.
     Clean,
     /// Run a command, stream its log, and return its exit code.
@@ -62,6 +66,16 @@ struct DaemonArgs {
     /// Maximum concurrent jobs, including CPU-only jobs.
     #[arg(long, default_value_t = 32)]
     max_running: usize,
+    /// Disable these device IDs across selected backends for this daemon lifetime.
+    #[arg(long, value_delimiter = ',')]
+    exclude_device_ids: Vec<u32>,
+}
+
+#[derive(Args)]
+struct DeviceIdsArgs {
+    /// Logical IDs shown by xinfo; applies across all selected backends.
+    #[arg(required = true, value_delimiter = ',', value_name = "ID[,ID...]")]
+    ids: Vec<u32>,
 }
 
 #[derive(Args)]
@@ -191,12 +205,25 @@ pub fn run(wrapper: Option<&str>) -> Result<i32> {
     let paths = Paths::discover()?;
     match cli.command {
         Action::Start(args) => start(&paths, args)?,
-        Action::Daemon(args) => crate::daemon::serve(paths, args.backend, args.max_running)?,
+        Action::Daemon(args) => crate::daemon::serve(
+            paths,
+            args.backend,
+            args.max_running,
+            &args.exclude_device_ids,
+        )?,
         Action::Stop => {
             request(&paths, &Request::Stop)?;
             println!("Scheduler stopped; running jobs continue.");
         }
         Action::Restart(args) => restart(&paths, args)?,
+        Action::Exclude(args) => {
+            request(&paths, &Request::Exclude(args.ids))?;
+            println!("Devices excluded; running jobs continue.");
+        }
+        Action::Include(args) => {
+            request(&paths, &Request::Include(args.ids))?;
+            println!("Devices re-enabled for scheduling.");
+        }
         Action::Clean => clean(&paths)?,
         Action::Run(args) => {
             crate::install_signals()?;
@@ -405,6 +432,9 @@ fn start(paths: &Paths, args: DaemonArgs) -> Result<()> {
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
         .stderr(log);
+    for id in args.exclude_device_ids {
+        command.arg("--exclude-device-ids").arg(id.to_string());
+    }
     unsafe {
         command.pre_exec(|| {
             if libc::setsid() == -1 {

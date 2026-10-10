@@ -15,6 +15,7 @@ pub struct Scheduler<E> {
     executor: E,
     paths: Paths,
     max_running: usize,
+    excluded_devices: HashSet<String>,
 }
 
 impl<E: Executor> Scheduler<E> {
@@ -37,7 +38,39 @@ impl<E: Executor> Scheduler<E> {
             executor,
             paths,
             max_running,
+            excluded_devices: HashSet::new(),
         })
+    }
+
+    pub fn exclude_devices(&mut self, ids: &[u32]) -> Result<()> {
+        self.set_devices_excluded(ids, true)
+    }
+
+    pub fn set_devices_excluded(&mut self, ids: &[u32], excluded: bool) -> Result<()> {
+        ensure!(
+            ids.iter().collect::<HashSet<_>>().len() == ids.len(),
+            "excluded device IDs must not contain duplicates"
+        );
+        for id in ids {
+            ensure!(
+                self.inventory.devices.iter().any(|device| device.id == *id),
+                "excluded device ID {id} does not exist in the selected backends"
+            );
+        }
+        let keys = self
+            .inventory
+            .devices
+            .iter()
+            .filter(|device| ids.contains(&device.id))
+            .map(Device::key);
+        for key in keys {
+            if excluded {
+                self.excluded_devices.insert(key);
+            } else {
+                self.excluded_devices.remove(&key);
+            }
+        }
+        Ok(())
     }
 
     fn save(&self) -> Result<()> {
@@ -136,10 +169,18 @@ impl<E: Executor> Scheduler<E> {
                 "device IDs are ambiguous across backends; specify --device"
             );
             spec.kind = Some(kinds[0]);
+            ensure!(
+                self.inventory.devices.iter().all(|device| {
+                    device.kind != kinds[0]
+                        || !ids.contains(&device.id)
+                        || !self.excluded_devices.contains(&device.key())
+                }),
+                "requested device IDs include a device disabled by the scheduler"
+            );
         }
         ensure!(
-            allocate(&spec, &self.inventory.devices, &HashSet::new()).is_some(),
-            "requested {} device(s), but no matching pool has enough devices",
+            allocate(&spec, &self.inventory.devices, &self.excluded_devices).is_some(),
+            "requested {} device(s), but no matching pool has enough enabled devices",
             spec.count
         );
         let id = self
@@ -220,6 +261,7 @@ impl<E: Executor> Scheduler<E> {
             .filter(|j| j.state == State::Running)
             .flat_map(|j| j.devices.iter().map(Device::key))
             .collect();
+        reserved.extend(self.excluded_devices.iter().cloned());
         reserved.extend(
             self.inventory
                 .devices
@@ -292,7 +334,9 @@ impl<E: Executor> Scheduler<E> {
                 DeviceView {
                     device: device.clone(),
                     job,
-                    status: if job.is_some() {
+                    status: if self.excluded_devices.contains(&device.key()) {
+                        "disabled".into()
+                    } else if job.is_some() {
                         "allocated".into()
                     } else {
                         self.inventory
@@ -463,6 +507,7 @@ mod tests {
             executor,
             paths,
             max_running: 2,
+            excluded_devices: HashSet::new(),
         };
         let mut single_device_job = history_job(1, State::Pending, 0);
         single_device_job.spec.count = 1;

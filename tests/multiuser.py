@@ -105,6 +105,12 @@ def main():
             assert command("xlurm", ["stop"], bob, check=False).returncode != 0
             assert command("xlurm", ["restart", "--backend", "none"], bob,
                 check=False).returncode != 0
+            for action in ("exclude", "include"):
+                denied = command("xlurm", [action, "0"], bob, check=False)
+                assert denied.returncode != 0 and "only the administrator" in denied.stderr, denied
+                # Root reaches device validation, rather than authorization rejection.
+                invalid = command("xlurm", [action, "0"], check=False)
+                assert invalid.returncode != 0 and "does not exist" in invalid.stderr, invalid
             command("xinfo", [], alice)  # Denied lifecycle commands must not stop the daemon.
             # Private state is inaccessible even outside the CLI.
             for path in (root / "state" / "state.json", root / "state" / "jobs" / f"{first}.log"):

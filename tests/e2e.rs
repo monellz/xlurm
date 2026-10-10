@@ -68,6 +68,10 @@ impl Harness {
     }
 
     fn start_with(&mut self, executable: impl AsRef<Path>) {
+        self.start_with_args(executable, &[]);
+    }
+
+    fn start_with_args(&mut self, executable: impl AsRef<Path>, args: &[&str]) {
         let log = fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -82,6 +86,7 @@ impl Harness {
                     "--max-running",
                     &self.max_running.to_string(),
                 ])
+                .args(args)
                 .stdout(log.try_clone().unwrap())
                 .stderr(log)
                 .spawn()
@@ -172,8 +177,8 @@ impl Drop for Harness {
                 }
             }
         }
+        let _ = self.command("xlurm").arg("stop").output();
         if let Some(mut daemon) = self.daemon.take() {
-            let _ = self.command("xlurm").arg("stop").output();
             let _ = daemon.kill();
             let _ = daemon.wait();
         }
@@ -543,6 +548,194 @@ fn excluded_device_ids_are_skipped_during_automatic_allocation() {
         .unwrap();
     assert!(!conflict.status.success());
     assert!(String::from_utf8_lossy(&conflict.stderr).contains("cannot be combined"));
+}
+
+#[test]
+fn scheduler_exclusions_block_exact_requests_and_survive_refresh() {
+    let mut h = Harness::new("ascend", 1);
+    h.drivers();
+    h.start_with_args(env!("CARGO_BIN_EXE_xlurm"), &["--exclude-device-ids", "2"]);
+    let devices: Vec<Value> = serde_json::from_slice(&h.run("xinfo", &["--json"]).stdout).unwrap();
+    assert_eq!(devices[0]["device"]["id"], 2);
+    assert_eq!(devices[0]["status"], "disabled");
+
+    let output = h.run(
+        "xrun",
+        &["sh", "-c", "printf '%s' \"$ASCEND_RT_VISIBLE_DEVICES\""],
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "3");
+    for args in [
+        vec!["-i", "2", "--wrap", "true"],
+        vec!["-g", "2", "--wrap", "true"],
+    ] {
+        let rejected = h.command("xbatch").args(args).output().unwrap();
+        assert!(!rejected.status.success());
+        assert!(
+            String::from_utf8_lossy(&rejected.stderr).contains("disable")
+                || String::from_utf8_lossy(&rejected.stderr).contains("enabled")
+        );
+    }
+
+    // Persisted pending jobs must also respect exclusions after a daemon restart.
+    let running = h.submit(&[
+        "-i",
+        "3",
+        "--wrap",
+        "while [ ! -f release ]; do sleep 0.05; done",
+    ]);
+    h.wait_state(running, "RUNNING");
+    let pending = h.submit(&["-i", "3", "--wrap", "echo resumed"]);
+    assert_eq!(h.job(pending)["state"], "PENDING");
+    h.run("xlurm", &["stop"]);
+    h.daemon.take().unwrap().wait().unwrap();
+    h.start_with_args(
+        env!("CARGO_BIN_EXE_xlurm"),
+        &["--exclude-device-ids", "2,3"],
+    );
+    let devices: Vec<Value> = serde_json::from_slice(&h.run("xinfo", &["--json"]).stdout).unwrap();
+    assert_eq!(devices[1]["status"], "disabled");
+    assert_eq!(devices[1]["job"], running);
+    fs::write(h.dir.path().join("release"), "").unwrap();
+    h.wait_state(running, "COMPLETED");
+    let cpu = h.submit(&["-g", "0", "--wrap", "true"]);
+    h.wait_state(cpu, "COMPLETED");
+    // Observe another probe instead of assuming the periodic refresh has run.
+    let queries = h.dir.path().join("npu-queries");
+    let previous_length = fs::metadata(&queries).unwrap().len();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while fs::metadata(&queries).unwrap().len() == previous_length {
+        assert!(
+            Instant::now() < deadline,
+            "device monitoring did not refresh"
+        );
+        sleep(Duration::from_millis(50));
+    }
+    let devices: Vec<Value> = serde_json::from_slice(&h.run("xinfo", &["--json"]).stdout).unwrap();
+    assert!(devices.iter().all(|device| device["status"] == "disabled"));
+    assert_eq!(h.job(pending)["state"], "PENDING");
+    h.run("xlurm", &["stop"]);
+    h.daemon.take().unwrap().wait().unwrap();
+    h.start();
+    h.wait_state(pending, "COMPLETED");
+}
+
+#[test]
+fn live_exclusions_are_additive_atomic_and_do_not_interrupt_running_jobs() {
+    let mut h = Harness::new("ascend", 2);
+    h.drivers();
+    h.start_with_args(env!("CARGO_BIN_EXE_xlurm"), &["--exclude-device-ids", "2"]);
+    let running = h.submit(&[
+        "-i",
+        "3",
+        "--wrap",
+        "while [ ! -f release ]; do sleep 0.05; done",
+    ]);
+    h.wait_state(running, "RUNNING");
+    let pending = h.submit(&["-i", "3", "--wrap", "echo resumed"]);
+    assert_eq!(h.job(pending)["state"], "PENDING");
+
+    h.run("xlurm", &["exclude", "3"]);
+    h.run("xlurm", &["exclude", "3"]); // Repeating an operation is harmless.
+    let devices: Vec<Value> = serde_json::from_slice(&h.run("xinfo", &["--json"]).stdout).unwrap();
+    assert!(devices.iter().all(|device| device["status"] == "disabled"));
+    assert_eq!(devices[1]["job"], running);
+    assert_eq!(h.job(running)["state"], "RUNNING");
+    for ids in ["2", "3"] {
+        assert!(
+            !h.command("xbatch")
+                .args(["-i", ids, "--wrap", "true"])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    }
+    fs::write(h.dir.path().join("release"), "").unwrap();
+    h.wait_state(running, "COMPLETED");
+    let cpu = h.submit(&["-g", "0", "--wrap", "true"]);
+    h.wait_state(cpu, "COMPLETED");
+    assert_eq!(h.job(pending)["state"], "PENDING");
+
+    // Invalid lists must not partially re-enable or exclude valid IDs.
+    for action in ["exclude", "include"] {
+        for ids in ["2,99", "2,2"] {
+            assert!(
+                !h.command("xlurm")
+                    .args([action, ids])
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            );
+        }
+    }
+    let devices: Vec<Value> = serde_json::from_slice(&h.run("xinfo", &["--json"]).stdout).unwrap();
+    assert!(devices.iter().all(|device| device["status"] == "disabled"));
+    h.run("xlurm", &["include", "3"]);
+    h.wait_state(pending, "COMPLETED");
+    let devices: Vec<Value> = serde_json::from_slice(&h.run("xinfo", &["--json"]).stdout).unwrap();
+    assert_eq!(devices[0]["status"], "disabled");
+    assert_ne!(devices[1]["status"], "disabled");
+    let invalid = h
+        .command("xlurm")
+        .args(["exclude", "3,99"])
+        .output()
+        .unwrap();
+    assert!(!invalid.status.success());
+    h.run("xrun", &["-i", "3", "true"]);
+    h.run("xlurm", &["include", "2,3"]);
+    h.run("xlurm", &["include", "2,3"]);
+    h.run("xrun", &["-i", "2,3", "true"]);
+    h.run("xlurm", &["exclude", "2,3"]);
+    let devices: Vec<Value> = serde_json::from_slice(&h.run("xinfo", &["--json"]).stdout).unwrap();
+    assert!(devices.iter().all(|device| device["status"] == "disabled"));
+}
+
+#[test]
+fn background_start_and_restart_apply_temporary_device_exclusions() {
+    let h = Harness::new("ascend", 1);
+    h.drivers();
+    for ids in ["99", "2,2"] {
+        let invalid = h
+            .command("xlurm")
+            .args(["daemon", "--backend", "ascend", "--exclude-device-ids", ids])
+            .output()
+            .unwrap();
+        assert!(!invalid.status.success());
+        let error = String::from_utf8_lossy(&invalid.stderr);
+        assert!(error.contains("does not exist") || error.contains("duplicates"));
+    }
+    h.run(
+        "xlurm",
+        &[
+            "start",
+            "--backend",
+            "ascend",
+            "--exclude-device-ids",
+            "2",
+            "--exclude-device-ids",
+            "3",
+        ],
+    );
+    let devices: Vec<Value> = serde_json::from_slice(&h.run("xinfo", &["--json"]).stdout).unwrap();
+    assert!(devices.iter().all(|device| device["status"] == "disabled"));
+    h.run(
+        "xlurm",
+        &[
+            "restart",
+            "--backend",
+            "ascend",
+            "--exclude-device-ids",
+            "3",
+        ],
+    );
+    let output = h.run(
+        "xrun",
+        &["sh", "-c", "printf '%s' \"$ASCEND_RT_VISIBLE_DEVICES\""],
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "2");
+    h.run("xlurm", &["restart", "--backend", "ascend"]);
+    h.run("xrun", &["-i", "2,3", "true"]);
 }
 
 #[test]

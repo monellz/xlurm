@@ -58,7 +58,12 @@ fn receive<T: DeserializeOwned>(socket: &mut UnixStream, limit: usize) -> Result
     }
 }
 
-pub fn serve(paths: Paths, backend: Backend, max_running: usize) -> Result<()> {
+pub fn serve(
+    paths: Paths,
+    backend: Backend,
+    max_running: usize,
+    exclude_device_ids: &[u32],
+) -> Result<()> {
     paths.initialize()?;
     let _lock =
         try_lock(&paths.0.join("daemon.lock"))?.context("xlurm daemon is already running")?;
@@ -66,6 +71,7 @@ pub fn serve(paths: Paths, backend: Backend, max_running: usize) -> Result<()> {
     let inventory = Inventory::discover(backend)?;
     let executor = ProcessExecutor::new(paths.clone());
     let mut scheduler = Scheduler::new(paths.clone(), inventory, executor, max_running)?;
+    scheduler.exclude_devices(exclude_device_ids)?;
     scheduler.tick()?;
     if let Err(error) = scheduler.cleanup(now()) {
         eprintln!("history cleanup: {error:#}");
@@ -183,6 +189,20 @@ fn handle(
             })
         }
         Request::Info => Ok(Response::Info(scheduler.info())),
+        Request::Exclude(_) | Request::Include(_) => {
+            ensure!(
+                uid == 0 || uid == unsafe { libc::geteuid() },
+                "only the administrator may exclude or include devices"
+            );
+            let (ids, excluded) = match request {
+                Request::Exclude(ids) => (ids, true),
+                Request::Include(ids) => (ids, false),
+                _ => unreachable!(),
+            };
+            ensure!(!ids.is_empty(), "device IDs must not be empty");
+            scheduler.set_devices_excluded(&ids, excluded)?;
+            Ok(Response::Ok)
+        }
         Request::Stop | Request::Restart => {
             ensure!(
                 uid == 0 || uid == unsafe { libc::geteuid() },
@@ -263,6 +283,8 @@ mod tests {
             Request::Cancel(id),
             Request::Stop,
             Request::Restart,
+            Request::Exclude(vec![0]),
+            Request::Include(vec![0]),
         ] {
             assert!(handle(&mut scheduler, &paths, 23457, 23457, request).is_err());
         }

@@ -79,8 +79,11 @@ sudo xlurm start --backend ascend            # 只管理 Ascend
 sudo xlurm start --backend mtt               # 只管理摩尔线程 GPU
 sudo xlurm start --backend metax             # 只管理 MetaX GPU
 sudo xlurm start --backend ppu               # 只管理 T-Head PPU
+sudo xlurm start --backend ascend --exclude-device-ids 2,3  # 临时禁用疑似故障卡
 sudo xlurm start --backend none              # CPU 模式，无需驱动
 sudo xlurm daemon --backend auto --max-running 32  # 前台运行
+sudo xlurm exclude 2,3                       # 运行期间排除卡 2、3
+sudo xlurm include 2                         # 无需重启，恢复卡 2 的调度
 sudo xlurm stop                              # 停止调度，已启动任务继续运行
 sudo xlurm restart                           # 停止并启动；有任务运行时拒绝操作
 sudo xlurm clean                             # 所有任务结束后删除日志
@@ -88,9 +91,13 @@ sudo xlurm clean                             # 所有任务结束后删除日志
 
 `xlurm clean` 是仅供管理员使用的离线操作。调度器仍在运行，或持久化状态中存在 `RUNNING` 任务时，它都会报错退出。两项检查均通过后，命令删除全部任务 `.log` 文件和 `daemon.log`，但保留排队任务、任务历史、结果和其他 spool 文件。如果 worker 在调度器停止期间结束，需要先重启调度器收集结果，再停止并执行 `clean`。后续新任务及后台调度器重启会重新创建日志文件。
 
-`start` 对已运行的调度器不做修改；更换 backend 或并发上限需要先 stop。再次启动会接管运行中的任务、读取离线期间完成的结果并继续排队任务。机器重启或 worker 异常消失后，无结果的运行任务标记为 `FAILED`，不会自动重跑。
+`start` 对已运行的调度器不做修改；更换 backend 或并发上限需要先 stop；运行期间可用 `exclude`/`include` 修改排除卡列表。再次启动会接管运行中的任务、读取离线期间完成的结果并继续排队任务。机器重启或 worker 异常消失后，无结果的运行任务标记为 `FAILED`，不会自动重跑。
 
-`restart` 等价于依次执行 `stop` 和 `start`，并接受与 `start` 相同的 backend 和并发上限参数。与 `stop` 不同，只要存在 `RUNNING` 任务，它就会报错并保持调度器运行；排队中的任务不影响重启。
+`restart` 等价于依次执行 `stop` 和 `start`，并接受与 `start` 相同的 backend、并发上限和排除卡参数。与 `stop` 不同，只要存在 `RUNNING` 任务，它就会报错并保持调度器运行；排队中的任务不影响重启。
+
+`start`、`daemon` 和 `restart` 支持 `--exclude-device-ids ID[,ID...]`（可重复指定），用于临时对所有用户禁用疑似故障卡的调度。编号使用 `xinfo` 显示的逻辑设备编号；多后端模式下，各已选后端中相同编号的卡都会被排除，可用 `--backend` 限定范围。不存在的编号和重复编号会报错。被排除的卡仍在 `xinfo` 中显示，状态为 `disabled`；若已分配给运行任务，仍显示任务 ID。自动分配和显式 `-i` 申请都遵守此限制，新提交任务超过可用卡数量时会被拒绝。原有排队任务若需要被排除的卡，会继续等待。通过 `stop`/`start` 接管的运行任务不受中断。排除设置不写入持久状态：再次启动或重启时不传此参数即可恢复调度。此调度器参数与单任务的 `xrun`/`xbatch -x` 选项独立。
+
+调度器运行期间，管理员可用 `xlurm exclude ID[,ID...]` 追加排除卡，用 `xlurm include ID[,ID...]` 恢复指定卡。这两个命令无需重启，对后续分配生效，不中断已有运行任务；卡恢复且空闲后，相关排队任务会继续执行。重复排除或恢复同一张卡不会报错，整个编号列表校验通过后才会修改设置。动态修改同样是临时的，调度器退出后清除。普通用户无权修改排除列表；非 root 测试调度器允许其自身账户操作。使用这些命令需要更新调度器，旧版调度器会拒绝新请求且不修改状态。
 
 默认共享状态目录为 `/var/lib/xlurm`。所有用户自动连接这里的 Unix socket，无需用户各自启动服务。可以通过 `XLURM_HOME` 指定其他由管理员持有的短绝对路径，所有客户端和调度器必须使用同一路径。没有配置文件，也没有网络监听端口。
 
@@ -142,6 +149,7 @@ xrun / xbatch / xqueue / xcancel / xinfo
 | 提交任务 | 以自己的 UID/GID 执行 | 以 root 执行 |
 | 任务详情、命令、环境、日志 | 仅自己的任务 | 所有任务 |
 | 取消任务 | 仅自己的任务 | 所有任务 |
+| 排除/恢复设备调度 | 不允许 | 允许 |
 | 启停共享调度器 | 不允许 | 允许 |
 
 身份来自内核 `SO_PEERCRED`，客户端无法通过 JSON 或 `USER` 环境变量指定任务属主。执行前重新解析本机账户及附加组，依次设置 supplementary groups、real/effective/saved GID 和 UID，再进入用户工作目录并执行命令。用户拥有的文件按该用户权限读写；Ascend/NVIDIA 驱动所需的用户组权限也得以保留。

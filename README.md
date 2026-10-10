@@ -81,8 +81,11 @@ sudo xlurm start --backend ascend            # Manage only Ascend
 sudo xlurm start --backend mtt               # Manage only Moore Threads GPUs
 sudo xlurm start --backend metax             # Manage only MetaX GPUs
 sudo xlurm start --backend ppu               # Manage only T-Head PPU devices
+sudo xlurm start --backend ascend --exclude-device-ids 2,3  # Temporarily disable suspect cards
 sudo xlurm start --backend none              # CPU mode; no device driver required
 sudo xlurm daemon --backend auto --max-running 32  # Run in the foreground
+sudo xlurm exclude 2,3                       # Disable cards while the scheduler is running
+sudo xlurm include 2                         # Re-enable card 2 without restarting
 sudo xlurm stop                              # Stop scheduling; already-started tasks continue
 sudo xlurm restart                           # Stop and start; refuse if any task is running
 sudo xlurm clean                             # Remove logs after all tasks have finished
@@ -90,9 +93,13 @@ sudo xlurm clean                             # Remove logs after all tasks have 
 
 `xlurm clean` is an offline administrator action. It refuses to run if the scheduler is active or if persisted state contains a `RUNNING` task. After both checks pass, it removes every task `.log` file and `daemon.log` while preserving queued tasks, task history, results, and other spool files. If a worker finishes while the scheduler is stopped, restart the scheduler once so it can collect the result before stopping it and running `clean`. New tasks and a subsequent background start create new log files.
 
-`start` does not modify an already-running scheduler; stop it first to change the backend or concurrency limit. A subsequent start takes over running tasks, reads results completed while it was offline, and continues queued tasks. After a machine reboot or unexpected worker disappearance, running tasks without results are marked `FAILED` and are not rerun automatically.
+`start` does not modify an already-running scheduler; stop it first to change the backend or concurrency limit. Use `exclude`/`include` to change device exclusions while it is running. A subsequent start takes over running tasks, reads results completed while it was offline, and continues queued tasks. After a machine reboot or unexpected worker disappearance, running tasks without results are marked `FAILED` and are not rerun automatically.
 
-`restart` is equivalent to `stop` followed by `start` and accepts the same backend and concurrency options as `start`. Unlike `stop`, it refuses to stop the scheduler while any task is `RUNNING`; queued tasks do not prevent a restart.
+`restart` is equivalent to `stop` followed by `start` and accepts the same backend, concurrency, and device exclusion options as `start`. Unlike `stop`, it refuses to stop the scheduler while any task is `RUNNING`; queued tasks do not prevent a restart.
+
+`start`, `daemon`, and `restart` accept `--exclude-device-ids ID[,ID...]` (repeatable) to temporarily remove suspect cards from scheduling for all users. IDs are the logical device IDs shown by `xinfo`; with multiple backends, the same ID is excluded in every selected backend, so use `--backend` to limit the scope. Unknown IDs and duplicates are rejected. Excluded cards remain visible in `xinfo` as `disabled`, with a job ID if already allocated. Both automatic allocation and exact `-i` requests respect this restriction; new requests exceeding the enabled pool are rejected. Previously queued tasks that need excluded cards remain pending. Running tasks adopted after `stop`/`start` continue without interruption. Exclusions are not persisted: start or restart without this option to re-enable the cards. This scheduler option is separate from the per-task `xrun`/`xbatch -x` option.
+
+While the scheduler is running, administrators can use `xlurm exclude ID[,ID...]` to add cards to the exclusion set and `xlurm include ID[,ID...]` to remove them. Both commands take effect for subsequent allocations without restarting or interrupting running tasks; queued tasks resume when their cards are re-enabled and available. Repeating either operation is harmless. The entire ID list is validated before any change. These live changes are also temporary and are cleared when the daemon exits. Ordinary users cannot change the exclusion set; a non-root test daemon permits its own account. New clients require an updated daemon for these commands; older daemons reject the new requests without changing state.
 
 The default shared state directory is `/var/lib/xlurm`. All users automatically connect to its Unix socket without starting their own service. Set `XLURM_HOME` to another short absolute path owned by the administrator; all clients and the scheduler must use the same path. There is no configuration file and no network listening port.
 
@@ -144,6 +151,7 @@ xrun / xbatch / xqueue / xcancel / xinfo
 | Submit a task | Runs with the user's UID/GID | Runs as root |
 | Task details, command, environment, logs | Own tasks only | All tasks |
 | Cancel a task | Own tasks only | All tasks |
+| Exclude/include devices | Not allowed | Allowed |
 | Start/stop the shared scheduler | Not allowed | Allowed |
 
 Identity comes from the kernel's `SO_PEERCRED`; clients cannot choose task ownership through JSON or the `USER` environment variable. Before execution, the scheduler re-resolves the local account and supplementary groups, sets supplementary groups plus real/effective/saved GID and UID, then enters the user's working directory and executes the command. Files owned by the user are accessed with that user's permissions, and groups required by Ascend/NVIDIA drivers are preserved.

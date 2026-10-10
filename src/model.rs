@@ -172,13 +172,16 @@ pub enum Request {
     Info,
     Stop,
     Restart,
+    Exclude(Vec<u32>),
+    Include(Vec<u32>),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DeviceView {
     pub device: Device,
     pub job: Option<u64>,
-    /// idle, busy (outside xlurm), unknown (probe failed), or allocated.
+    /// idle, busy (outside xlurm), unknown (probe failed), allocated, unhealthy,
+    /// or disabled (excluded by the scheduler, even if already allocated).
     pub status: String,
 }
 
