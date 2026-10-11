@@ -1,6 +1,8 @@
 use serde_json::Value;
 use std::fs;
+use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::symlink;
+use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
 use std::thread::sleep;
@@ -220,6 +222,60 @@ impl Drop for Harness {
             let _ = daemon.wait();
         }
     }
+}
+
+#[test]
+fn large_queue_responses_preserve_history_and_privacy() {
+    let mut h = Harness::new("none", 1);
+    h.start();
+    let id = h.submit(&["-g", "0", "--wrap", "true"]);
+    h.wait_state(id, "COMPLETED");
+    h.run("xlurm", &["stop"]);
+    h.daemon.take().unwrap().wait().unwrap();
+
+    let state_path = h.dir.path().join("state/state.json");
+    let mut store: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    let template = store["jobs"][0].clone();
+    store["jobs"] = (1..=2000)
+        .map(|id| {
+            let mut job = template.clone();
+            job["id"] = id.into();
+            job["spec"]["name"] = format!("history-{id}").into();
+            job
+        })
+        .collect::<Vec<_>>()
+        .into();
+    store["next_id"] = 2000.into();
+    fs::write(&state_path, serde_json::to_vec(&store).unwrap()).unwrap();
+    h.start();
+
+    // Read the full existing wire response, including its final newline, across
+    // many buffer flushes; the CLI still limits display to the latest 100 jobs.
+    let mut socket = UnixStream::connect(h.dir.path().join("state/xlurm.sock")).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    socket.write_all(b"\"Queue\"\n").unwrap();
+    let mut response = String::new();
+    BufReader::new(socket).read_line(&mut response).unwrap();
+    assert!(response.ends_with('\n'));
+    let queue: Value = serde_json::from_str(&response).unwrap();
+    let jobs = queue["Queue"].as_array().unwrap();
+    assert_eq!(jobs.len(), 2000);
+    assert_eq!(jobs[0]["id"], 1);
+    assert_eq!(jobs[1999]["name"], "history-2000");
+    assert!(jobs.iter().all(|job| job.get("spec").is_none()
+        && job.get("command").is_none()
+        && job.get("env").is_none()));
+    let visible: Vec<Value> =
+        serde_json::from_slice(&h.run("xqueue", &["--all", "--json"]).stdout).unwrap();
+    assert_eq!(visible.len(), 100);
+    assert_eq!(visible[0]["id"], 1901);
+    assert_eq!(visible[99]["id"], 2000);
+    assert_eq!(h.run("xqueue", &["--json"]).stdout, b"[]\n");
+    let next = h.submit(&["-g", "0", "--wrap", "true"]);
+    assert_eq!(next, 2001);
+    h.wait_state(next, "COMPLETED");
 }
 
 #[test]

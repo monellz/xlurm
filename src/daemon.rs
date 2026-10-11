@@ -7,7 +7,8 @@ use crate::storage::{Paths, try_lock};
 use anyhow::{Context, Result, ensure};
 use serde::{Serialize, de::DeserializeOwned};
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::time::{Duration, Instant};
@@ -30,8 +31,10 @@ pub fn request(paths: &Paths, request: &Request) -> Result<Response> {
 }
 
 fn send(socket: &mut UnixStream, value: &impl Serialize) -> Result<()> {
-    serde_json::to_writer(&mut *socket, value)?;
-    socket.write_all(b"\n")?;
+    let mut writer = BufWriter::new(socket);
+    serde_json::to_writer(&mut writer, value)?;
+    writer.write_all(b"\n")?;
+    writer.flush()?;
     Ok(())
 }
 
@@ -137,7 +140,19 @@ pub fn serve(
             }
             cleaned = Instant::now();
         }
-        std::thread::sleep(Duration::from_millis(50));
+        // Wake immediately for clients while retaining the 50 ms task polling
+        // cadence when idle. Signals interrupt poll so shutdown stays prompt.
+        let mut descriptor = libc::pollfd {
+            fd: listener.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        if unsafe { libc::poll(&mut descriptor, 1, 50) } < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(error).context("cannot wait for client connections");
+            }
+        }
     }
     Ok(())
 }

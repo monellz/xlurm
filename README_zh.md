@@ -140,6 +140,7 @@ xrun / xbatch / xqueue / xcancel / xinfo
 - T-Head PPU 用 `ppu-smi --query-ppu` 按 UUID 发现设备，并通过 `--query-compute-apps` 检查外部计算进程。任务将已分配 UUID 写入 `CUDA_VISIBLE_DEVICES`；显示简写为 `ppu`。
 - Hygon HCU 用 `hy-smi` 按 Unique ID 发现设备，通过 `--showpids` 和 `--healthcheck` 检查 KFD 进程占用与健康状态。不健康设备不参与分配，探测失败会暂停分配。任务按逻辑编号设置 `HIP_VISIBLE_DEVICES`、`ROCR_VISIBLE_DEVICES` 和 `CUDA_VISIBLE_DEVICES`；显示简写为 `hcu`。
 - 每两秒检查驱动报告的外部计算进程；有占用的设备暂不分配，查询失败显示 `unknown` 并暂停分配。单次驱动**命令**调用最多等待 3 秒；DCMI 接口在调度器中同步调用，依赖驱动自身的返回时间，没有应用层超时。
+- 客户端连接会立即唤醒空闲的调度器；队列响应使用缓冲写入，避免历史任务较多时产生大量系统调用。调度器保持单线程。
 - worker 持有继承的文件锁，调度器重启后通过锁接管任务；不靠裸 PID 判断任务是否存活。退出结果通过原子文件写入。
 - 取消先向进程组发 SIGTERM，一秒后仍未退出则发 SIGKILL。任务主进程结束时清理同组后台子进程，并回收孤儿进程，然后释放设备。
 
