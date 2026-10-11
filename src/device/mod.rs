@@ -1,3 +1,5 @@
+mod ascend;
+
 use crate::model::{Device, Kind};
 use anyhow::{Context, Result, bail, ensure};
 use clap::ValueEnum;
@@ -29,7 +31,7 @@ pub struct Inventory {
     pub devices: Vec<Device>,
     pub status: HashMap<String, String>,
     nvidia: PathBuf,
-    ascend: PathBuf,
+    ascend: Option<ascend::Dcmi>,
     mthreads: PathBuf,
     metax: PathBuf,
     ppu: PathBuf,
@@ -42,13 +44,7 @@ impl Inventory {
             devices: vec![],
             status: HashMap::new(),
             nvidia: locate("nvidia-smi", &[]),
-            ascend: locate(
-                "npu-smi",
-                &[
-                    "/usr/local/sbin/npu-smi",
-                    "/usr/local/Ascend/driver/tools/npu-smi",
-                ],
-            ),
+            ascend: None,
             mthreads: locate("mthreads-gmi", &[]),
             metax: locate("mx-smi", &["/opt/mxdriver/bin/mx-smi"]),
             ppu: locate("ppu-smi", &["/usr/local/PPU_SDK/ppu-smi/bin/ppu-smi"]),
@@ -74,9 +70,12 @@ impl Inventory {
                     ],
                 )
                 .and_then(|text| parse_nvidia(&text)),
-                Kind::Ascend => {
-                    output(&inventory.ascend, &["info", "-m"]).and_then(|text| parse_ascend(&text))
-                }
+                Kind::Ascend => ascend::Dcmi::load().and_then(|driver| {
+                    let devices = driver.discover()?;
+                    inventory.ascend = Some(driver);
+                    eprintln!("Ascend: using DCMI v2 API");
+                    Ok(devices)
+                }),
                 Kind::Mthreads => output(&inventory.mthreads, &["--list-gpus"])
                     .and_then(|text| parse_mthreads(&text)),
                 Kind::Metax => {
@@ -145,7 +144,6 @@ impl Inventory {
             .as_ref()
             .and_then(|result| result.as_ref().ok())
             .and_then(|text| hcu_health_status(text));
-        let mut ascend_health = HashMap::new();
         for device in &self.devices {
             let mut unhealthy = false;
             let idle = match device.kind {
@@ -158,27 +156,12 @@ impl Inventory {
                     })
                     .map(|text| !text.lines().any(|line| line.trim() == device.visible)),
                 Kind::Ascend => {
-                    let npu_id = device.npu.unwrap();
-                    let npu = npu_id.to_string();
-                    let chip = device.chip.map(|chip| chip.to_string());
-                    let mut args = vec!["info", "-t", "proc-mem", "-i", &npu];
-                    if let Some(chip) = &chip {
-                        args.extend(["-c", chip]);
-                    }
-                    let process_idle = output(&self.ascend, &args)
-                        .ok()
-                        .and_then(|text| ascend_idle(&text));
-                    let healthy = *ascend_health.entry(npu_id).or_insert_with(|| {
-                        output(&self.ascend, &["info", "-t", "health", "-i", &npu])
-                            .ok()
-                            .and_then(|text| ascend_healthy(&text))
-                    });
-                    unhealthy = healthy == Some(false);
-                    match healthy {
-                        Some(false) => Some(false),
-                        Some(true) => process_idle,
-                        None => None,
-                    }
+                    let status = self
+                        .ascend
+                        .as_ref()
+                        .map_or("unknown", |driver| driver.status(device));
+                    self.status.insert(device.key(), status.into());
+                    continue;
                 }
                 Kind::Mthreads => mthreads_busy
                     .as_ref()
@@ -285,32 +268,6 @@ fn hcu_health_status(text: &str) -> Option<HashMap<u32, bool>> {
         health.insert(id, status.eq_ignore_ascii_case("healthy"));
     }
     (!health.is_empty()).then_some(health)
-}
-
-fn ascend_idle(text: &str) -> Option<bool> {
-    let lower = text.to_ascii_lowercase();
-    if lower.contains("process id:") || lower.contains("process id :") {
-        Some(false)
-    } else if lower.contains("no running processes") || lower.contains("no process in device") {
-        Some(true)
-    } else {
-        None
-    }
-}
-
-fn ascend_healthy(text: &str) -> Option<bool> {
-    let mut found_status = false;
-    for (key, value) in text.lines().filter_map(|line| line.split_once(':')) {
-        let key = key.trim();
-        if !key.eq_ignore_ascii_case("health") && !key.eq_ignore_ascii_case("health status") {
-            continue;
-        }
-        found_status = true;
-        if !value.trim().eq_ignore_ascii_case("ok") {
-            return Some(false);
-        }
-    }
-    found_status.then_some(true)
 }
 
 fn locate(program: &str, fallbacks: &[&str]) -> PathBuf {
@@ -593,80 +550,6 @@ fn metax_busy_devices(text: &str) -> Option<HashSet<u32>> {
     saw_process_header.then_some(busy)
 }
 
-fn parse_ascend(text: &str) -> Result<Vec<Device>> {
-    let mut lines = text.lines();
-    let header = lines
-        .find(|line| line.contains("NPU ID"))
-        .context("missing Ascend mapping header")?;
-    // Turn multiword column names into single tokens before indexing data rows.
-    let mut header = header.to_string();
-    for label in [
-        "Chip Logic ID",
-        "Chip Phy-ID",
-        "Chip Count",
-        "Chip Name",
-        "Chip ID",
-        "Slot ID",
-        "Device ID",
-        "NPU ID",
-    ] {
-        header = header.replace(label, &label.replace(' ', "_"));
-    }
-    let columns: Vec<_> = header.split_whitespace().collect();
-    let index = |name: &str| columns.iter().position(|column| *column == name);
-    let npu_column = index("NPU_ID").context("missing NPU ID")?;
-    let logic_column = index("Chip_Logic_ID").or_else(|| index("Chip_Phy-ID"));
-    let mut devices = Vec::new();
-    for line in lines {
-        let fields: Vec<_> = line.split_whitespace().collect();
-        if fields.is_empty() || fields.iter().any(|f| f.eq_ignore_ascii_case("mcu")) {
-            continue;
-        }
-        let get = |column: usize| {
-            fields
-                .get(column)
-                .copied()
-                .context("short Ascend mapping row")
-        };
-        let Ok(npu) = get(npu_column)?.parse::<u32>() else {
-            continue;
-        };
-        let id: u32 = get(logic_column.unwrap_or(npu_column))?
-            .parse()
-            .context("invalid logical device ID; refusing to guess Ascend mapping")?;
-        let chip = index("Chip_ID")
-            .map(|column| {
-                get(column)?
-                    .parse::<u32>()
-                    .context("invalid Ascend chip ID")
-            })
-            .transpose()?;
-        devices.push(Device {
-            kind: Kind::Ascend,
-            id,
-            visible: id.to_string(),
-            npu: Some(npu),
-            chip,
-            name: index("Chip_Name")
-                .map(get)
-                .transpose()?
-                .unwrap_or("Ascend")
-                .into(),
-        });
-    }
-    let mut counts = HashMap::new();
-    for device in &devices {
-        *counts.entry(device.npu).or_insert(0) += 1;
-    }
-    for device in &mut devices {
-        if counts[&device.npu] == 1 {
-            device.chip = None;
-        }
-    }
-    devices.sort_by_key(|device| device.id);
-    validate(devices)
-}
-
 fn validate(devices: Vec<Device>) -> Result<Vec<Device>> {
     if devices.is_empty() {
         bail!("no compute devices discovered");
@@ -682,28 +565,6 @@ fn validate(devices: Vec<Device>) -> Result<Vec<Device>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn ascend_uses_logical_ids_and_ignores_management_chips() {
-        let devices = parse_ascend("NPU ID  Chip ID  Chip Logic ID  Chip Name\n4 0 2 Ascend910B\n4 1 3 Ascend910B\n4 2 - Mcu\n").unwrap();
-        assert_eq!(
-            devices
-                .iter()
-                .map(|d| (d.id, d.npu, d.chip))
-                .collect::<Vec<_>>(),
-            vec![(2, Some(4), Some(0)), (3, Some(4), Some(1))]
-        );
-    }
-
-    #[test]
-    fn ascend_supports_phy_id_and_rejects_ambiguous_mapping() {
-        let devices =
-            parse_ascend("NPU ID Slot ID Chip ID Chip Phy-ID Chip Name\n7 0 0 5 Ascend950PR\n")
-                .unwrap();
-        assert_eq!(devices[0].visible, "5");
-        assert_eq!(devices[0].chip, None);
-        assert!(parse_ascend("NPU ID Chip ID Chip Name\n0 0 Ascend\n0 1 Ascend\n").is_err());
-    }
 
     #[test]
     fn nvidia_uses_uuid_instead_of_unstable_ordinal() {
@@ -771,31 +632,5 @@ mod tests {
             Some(HashSet::from([3]))
         );
         assert_eq!(metax_busy_devices("| Process: |\n| unavailable |\n"), None);
-    }
-
-    #[test]
-    fn ascend_process_formats_fail_closed() {
-        assert_eq!(
-            ascend_idle("NPU ID : 0\nNo process in device.\n"),
-            Some(true)
-        );
-        assert_eq!(
-            ascend_idle("No running processes found in NPU 4"),
-            Some(true)
-        );
-        assert_eq!(
-            ascend_idle("Process id:45180 Process name:VLLMEngineCor"),
-            Some(false)
-        );
-        assert_eq!(ascend_idle("Failed to query device"), None);
-    }
-
-    #[test]
-    fn ascend_health_requires_every_reported_health_status_to_be_ok() {
-        assert_eq!(ascend_healthy("Health : OK\nHealth : OK\n"), Some(true));
-        assert_eq!(ascend_healthy("Health Status : Alarm\n"), Some(false));
-        assert_eq!(ascend_healthy("Health : Critical\n"), Some(false));
-        assert_eq!(ascend_healthy("Health : OK\nHealth : Alarm\n"), Some(false));
-        assert_eq!(ascend_healthy("health query failed"), None);
     }
 }

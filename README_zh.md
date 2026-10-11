@@ -99,6 +99,8 @@ sudo xlurm clean                             # 所有任务结束后删除日志
 
 调度器运行期间，管理员可用 `xlurm exclude ID[,ID...]` 追加排除卡，用 `xlurm include ID[,ID...]` 恢复指定卡。这两个命令无需重启，对后续分配生效，不中断已有运行任务；卡恢复且空闲后，相关排队任务会继续执行。重复排除或恢复同一张卡不会报错，整个编号列表校验通过后才会修改设置。动态修改同样是临时的，调度器退出后清除。普通用户无权修改排除列表；非 root 测试调度器允许其自身账户操作。使用这些命令需要更新调度器，旧版调度器会拒绝新请求且不修改状态。
 
+Ascend 自动使用 DCMI v2，不使用 v1 接口。Ascend 后端要求驱动库、v2 符号可用且初始化成功，失败会报告设备发现错误。库依次从 `/usr/local/dcmi/libdcmi.so`、`/usr/local/Ascend/driver/lib64/driver/libdcmi.so`、动态加载器的 `libdcmi.so` 搜索路径加载。管理员可在守护进程环境中设置 `XLURM_DCMI_LIBRARY=/absolute/path/libdcmi.so` 使用其他可信驱动库；显式路径会禁用上述搜索。配置在守护进程启动时生效（包括 `restart`），不读取任务提交者的环境。
+
 默认共享状态目录为 `/var/lib/xlurm`。所有用户自动连接这里的 Unix socket，无需用户各自启动服务。可以通过 `XLURM_HOME` 指定其他由管理员持有的短绝对路径，所有客户端和调度器必须使用同一路径。没有配置文件，也没有网络监听端口。
 
 状态目录为 root 所有、0755，socket 为 0666，供本机用户连接；`jobs/` 为 0700，状态、环境、日志为 0600。**所有用户都能查看全主机的队列摘要，但不能修改队列文件或直接读取其他人的日志**。所有日志访问都经过服务端鉴权。
@@ -132,12 +134,12 @@ xrun / xbatch / xqueue / xcancel / xinfo
 - 调度器按提交顺序扫描，资源足够就启动；大任务等资源时允许后面的小任务先跑。最多同时运行 32 个任务，可用 `--max-running` 调整。
 - 每个设备槽独占分配，单个任务只使用一个厂商的设备池。自动选择优先尝试 NVIDIA、Ascend、摩尔线程、MetaX、PPU，再尝试 HCU。多芯片 Ascend 卡按独立计算芯片分配。
 - NVIDIA 用 `nvidia-smi` 发现与监测，按 GPU UUID 设置 `CUDA_VISIBLE_DEVICES`，避免 CUDA 与管理工具索引顺序不同。
-- Ascend 用 `npu-smi info -m` 解析映射，按逻辑 ID 设置 `ASCEND_RT_VISIBLE_DEVICES`。兼容 `Chip Logic ID` 和 Ascend950PR 的 `Chip Phy-ID` 列；不会把多芯片卡的物理卡号误当成逻辑号。物理卡号/芯片号仅用于驱动查询。健康状态不是 `OK` 的设备显示为 `unhealthy`，不参与分配；健康查询失败显示为 `unknown`，同样暂停分配。
+- Ascend 默认只加载一次 `libdcmi.so`，直接通过 DCMI v2 查询逻辑设备 ID、各芯片健康状态及进程占用，保持单线程调度。按逻辑 ID 设置 `ASCEND_RT_VISIBLE_DEVICES`，DCMI v2 直接按逻辑 ID 查询，无需物理卡号/芯片号映射。Ascend 后端要求驱动库、v2 符号可用且初始化成功，失败会报告设备发现错误。自动发现后端时，发现错误会跳过 Ascend；显式指定 `--backend ascend` 时，发现错误会阻止启动。监测失败或设备不存在时显示 `unknown` 并暂停分配，健康状态非零时显示 `unhealthy` 并排除该芯片。
 - 摩尔线程用 `mthreads-gmi --list-gpus` 发现设备并保存 UUID；通过 `mthreads-gmi` 进程表识别外部占用。任务设置 `MTHREADS_VISIBLE_DEVICES` UUID 和 `MUSA_VISIBLE_DEVICES` 设备序号，显示简写为 `mtt`。
 - MetaX 用 `mx-smi -L` 发现设备并保存 UUID，通过 `mx-smi --show-all-process` 识别外部占用。任务设置设备序号到 `CUDA_VISIBLE_DEVICES` 和 `MACA_VISIBLE_DEVICES`；显示简写为 `mx`。
 - T-Head PPU 用 `ppu-smi --query-ppu` 按 UUID 发现设备，并通过 `--query-compute-apps` 检查外部计算进程。任务将已分配 UUID 写入 `CUDA_VISIBLE_DEVICES`；显示简写为 `ppu`。
 - Hygon HCU 用 `hy-smi` 按 Unique ID 发现设备，通过 `--showpids` 和 `--healthcheck` 检查 KFD 进程占用与健康状态。不健康设备不参与分配，探测失败会暂停分配。任务按逻辑编号设置 `HIP_VISIBLE_DEVICES`、`ROCR_VISIBLE_DEVICES` 和 `CUDA_VISIBLE_DEVICES`；显示简写为 `hcu`。
-- 每两秒检查驱动报告的外部计算进程；有占用的设备暂不分配，查询失败显示 `unknown` 并暂停分配。单次驱动调用最多等待 3 秒。
+- 每两秒检查驱动报告的外部计算进程；有占用的设备暂不分配，查询失败显示 `unknown` 并暂停分配。单次驱动**命令**调用最多等待 3 秒；DCMI 接口在调度器中同步调用，依赖驱动自身的返回时间，没有应用层超时。
 - worker 持有继承的文件锁，调度器重启后通过锁接管任务；不靠裸 PID 判断任务是否存活。退出结果通过原子文件写入。
 - 取消先向进程组发 SIGTERM，一秒后仍未退出则发 SIGKILL。任务主进程结束时清理同组后台子进程，并回收孤儿进程，然后释放设备。
 
@@ -172,7 +174,7 @@ cargo build --bins --locked
 sudo python3 tests/multiuser.py
 ```
 
-端到端测试通过模拟驱动覆盖 NVIDIA、Ascend 和 PPU，验证独占分配、外部占用/查询失败、前台退出码、脚本快照、取消、超时和调度器崩溃接管；权限测试覆盖属主伪造、跨用户查询/读日志/取消、管理员权限和队列隐私。普通 `cargo test` 不需要 root。
+端到端测试通过模拟驱动覆盖 NVIDIA、Ascend 和 PPU，验证独占分配、外部占用/查询失败、前台退出码、脚本快照、取消、超时和调度器崩溃接管；权限测试覆盖属主伪造、跨用户查询/读日志/取消、管理员权限和队列隐私。普通 `cargo test` 不需要 root 或加速卡硬件；DCMI 测试会编译模拟动态库，需要 C 编译器（`cc`）。
 
 `tests/multiuser.py` 使用现有 `nobody`、`daemon` 两个账户，验证真实 UID/GID/附加组切换、输出文件属主、私有队列及越权拒绝；使用临时目录和 CPU 任务，不修改账户配置。开发时可通过 `XLURM_HOME=/tmp/my-xlurm xlurm daemon --backend none` 启动仅当前账户可访问的非 root 测试实例。
 

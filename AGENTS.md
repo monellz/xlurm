@@ -18,7 +18,8 @@ The main binaries are `xlurm`, `xrun`, `xbatch`, `xqueue`, `xcancel`, and
 - `src/scheduler.rs`: queue state, resource allocation, cleanup, and recovery.
 - `src/executor.rs`: worker processes, privilege dropping, process groups, and
   result collection.
-- `src/device.rs`: NVIDIA and Ascend discovery and occupancy checks.
+- `src/device/mod.rs`: shared device inventory, backend selection, and occupancy checks.
+- `src/device/ascend.rs`: Ascend discovery and monitoring through DCMI v2.
 - `src/auth.rs`: Unix peer credentials, account lookup, and authorization.
 - `src/storage.rs`: state paths, permissions, locking, and atomic JSON writes.
 - `tests/e2e.rs`: end-to-end behavior using simulated accelerator drivers.

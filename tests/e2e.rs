@@ -44,6 +44,7 @@ impl Harness {
         command
             .current_dir(self.dir.path())
             .env("XLURM_HOME", self.dir.path().join("state"))
+            .env("XLURM_DCMI_LIBRARY", self.dir.path().join("libdcmi.so"))
             .env(
                 "PATH",
                 format!("{}:/usr/bin:/bin", self.dir.path().join("bin").display()),
@@ -146,11 +147,12 @@ impl Harness {
     }
 
     fn drivers(&self) {
+        self.dcmi();
         // Do not write executables while other test threads spawn processes:
         // fork can inherit the writer before CLOEXEC takes effect, making a
         // just-written script fail with ETXTBSY even after fs::write returns.
         // Links also work when the test's temporary directory is mounted noexec.
-        for name in ["nvidia-smi", "npu-smi", "mx-smi"] {
+        for name in ["nvidia-smi", "mx-smi"] {
             symlink(
                 Path::new(env!("CARGO_MANIFEST_DIR"))
                     .join("tests/fixtures")
@@ -158,6 +160,41 @@ impl Harness {
                 self.dir.path().join("bin").join(name),
             )
             .unwrap();
+        }
+    }
+
+    fn dcmi(&self) {
+        self.dcmi_with_flags(&[]);
+    }
+
+    fn dcmi_with_flags(&self, flags: &[&str]) {
+        let output = Command::new("cc")
+            .args(flags)
+            .args(["-shared", "-fPIC", "-Wall", "-Wextra", "-Werror", "-o"])
+            .arg(self.dir.path().join("libdcmi.so"))
+            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/dcmi.c"))
+            .output()
+            .expect("DCMI fixture requires a C compiler (cc)");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn wait_device_status(&self, status: &str) {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            let devices: Vec<Value> =
+                serde_json::from_slice(&self.run("xinfo", &["--json"]).stdout).unwrap();
+            if !devices.is_empty() && devices.iter().all(|device| device["status"] == status) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "wanted {status}, got {devices:?}"
+            );
+            sleep(Duration::from_millis(30));
         }
     }
 }
@@ -373,9 +410,9 @@ fn both_vendors_are_exclusive_and_external_busy_or_unknown_devices_wait() {
     );
     assert_eq!(String::from_utf8(npu.stdout).unwrap(), "2,3|0");
     assert!(
-        fs::read_to_string(h.dir.path().join("npu-queries"))
+        fs::read_to_string(h.dir.path().join("dcmi-queries"))
             .unwrap()
-            .contains("-i 4 -c 1")
+            .contains("process 3")
     );
     fs::write(h.dir.path().join("probe-error"), "").unwrap();
     fs::remove_file(h.dir.path().join("busy")).unwrap();
@@ -407,6 +444,129 @@ fn both_vendors_are_exclusive_and_external_busy_or_unknown_devices_wait() {
     h.wait_state(gpu, "COMPLETED");
     h.wait_state(next, "COMPLETED");
     assert_eq!(h.log(gpu), "GPU-test-uuid\n");
+}
+
+#[test]
+fn ascend_dcmi_queries_fail_closed_and_recover() {
+    let mut h = Harness::new("ascend", 2);
+    h.drivers();
+    fs::write(h.dir.path().join("npu-busy"), "").unwrap();
+    h.start();
+    h.wait_device_status("busy");
+    let devices: Vec<Value> = serde_json::from_slice(&h.run("xinfo", &["--json"]).stdout).unwrap();
+    assert_eq!(devices[0]["device"]["id"], 2);
+    assert_eq!(devices[1]["device"]["visible"], "3");
+    assert!(devices[0]["device"]["npu"].is_null());
+    assert!(devices[1]["device"]["chip"].is_null());
+    assert_eq!(devices[0]["device"]["name"], "Ascend950PR");
+
+    let job = h.submit(&[
+        "-i",
+        "2",
+        "--wrap",
+        "while [ ! -f release ]; do sleep 0.05; done",
+    ]);
+    assert_eq!(h.job(job)["state"], "PENDING");
+    for marker in [
+        "npu-health-error",
+        "probe-error",
+        "dcmi-invalid-process-count",
+        "dcmi-missing-device",
+    ] {
+        fs::write(h.dir.path().join(marker), "").unwrap();
+        h.wait_device_status("unknown");
+        assert_eq!(h.job(job)["state"], "PENDING");
+        fs::remove_file(h.dir.path().join(marker)).unwrap();
+        h.wait_device_status("busy");
+    }
+    fs::write(h.dir.path().join("npu-health"), "Alarm").unwrap();
+    h.wait_device_status("unhealthy");
+    assert_eq!(h.job(job)["state"], "PENDING");
+    fs::remove_file(h.dir.path().join("npu-health")).unwrap();
+    fs::remove_file(h.dir.path().join("npu-busy")).unwrap();
+    let running = h.wait_state(job, "RUNNING");
+    assert_eq!(running["devices"][0]["visible"], "2");
+    let pending = h.submit(&["-i", "2", "--wrap", "true"]);
+    assert_eq!(h.job(pending)["state"], "PENDING");
+    fs::write(h.dir.path().join("release"), "").unwrap();
+    h.wait_state(job, "COMPLETED");
+    h.wait_state(pending, "COMPLETED");
+    let queries = fs::read_to_string(h.dir.path().join("dcmi-queries")).unwrap();
+    assert_eq!(
+        queries
+            .lines()
+            .filter(|line| line.starts_with("init "))
+            .count(),
+        1
+    );
+    assert!(queries.contains("process 2") && queries.contains("process 3"));
+    assert!(
+        queries
+            .lines()
+            .filter(|line| !line.starts_with("init "))
+            .all(|line| line.ends_with(" 2") || line.ends_with(" 3"))
+    );
+}
+
+#[test]
+fn ascend_dcmi_startup_errors_fail_closed() {
+    let h = Harness::new("ascend", 1);
+    h.drivers();
+    for marker in [
+        "dcmi-init-error",
+        "dcmi-device-count-error",
+        "dcmi-invalid-id",
+        "dcmi-chip-info-error",
+        "dcmi-duplicate-id",
+    ] {
+        fs::write(h.dir.path().join(marker), "").unwrap();
+        let output = h
+            .command("xlurm")
+            .args(["daemon", "--backend", "ascend"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(!h.dir.path().join("state/xlurm.sock").exists());
+        fs::remove_file(h.dir.path().join(marker)).unwrap();
+    }
+    fs::remove_file(h.dir.path().join("libdcmi.so")).unwrap();
+    let output = h
+        .command("xlurm")
+        .args(["daemon", "--backend", "ascend"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot load DCMI"));
+    h.dcmi_with_flags(&["-DOMIT_PROCESS_API"]);
+    let output = h
+        .command("xlurm")
+        .args(["daemon", "--backend", "ascend"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("missing dcmiv2_get_device_resource_info")
+    );
+    assert!(!h.dir.path().join("state/xlurm.sock").exists());
+}
+
+#[test]
+fn ascend_dcmi_health_is_per_chip_and_skips_unhealthy_process_queries() {
+    let mut h = Harness::new("ascend", 2);
+    h.drivers();
+    fs::write(h.dir.path().join("npu-chip0-unhealthy"), "").unwrap();
+    h.start();
+    let devices: Vec<Value> = serde_json::from_slice(&h.run("xinfo", &["--json"]).stdout).unwrap();
+    assert_eq!(devices[0]["status"], "unhealthy");
+    assert_eq!(devices[1]["status"], "idle");
+    let queries = fs::read_to_string(h.dir.path().join("dcmi-queries")).unwrap();
+    assert!(!queries.contains("process 2"));
+    assert!(queries.contains("process 3"));
+    let blocked = h.submit(&["-i", "2", "--wrap", "true"]);
+    h.wait_state(h.submit(&["-i", "3", "--wrap", "true"]), "COMPLETED");
+    assert_eq!(h.job(blocked)["state"], "PENDING");
+    fs::remove_file(h.dir.path().join("npu-chip0-unhealthy")).unwrap();
+    h.wait_state(blocked, "COMPLETED");
 }
 
 #[test]
@@ -600,7 +760,7 @@ fn scheduler_exclusions_block_exact_requests_and_survive_refresh() {
     let cpu = h.submit(&["-g", "0", "--wrap", "true"]);
     h.wait_state(cpu, "COMPLETED");
     // Observe another probe instead of assuming the periodic refresh has run.
-    let queries = h.dir.path().join("npu-queries");
+    let queries = h.dir.path().join("dcmi-queries");
     let previous_length = fs::metadata(&queries).unwrap().len();
     let deadline = Instant::now() + Duration::from_secs(8);
     while fs::metadata(&queries).unwrap().len() == previous_length {
