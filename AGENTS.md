@@ -2,10 +2,10 @@
 
 ## Project Overview
 
-`xlurm` is a small Linux-only, multi-user scheduler for NVIDIA, Moore Threads, MetaX, Ascend, PPU, and HCU
-accelerators. It is written in Rust and communicates over a local Unix socket. Keep the
-implementation deliberately small: there is no async runtime, database, HTTP
-service, web UI, or tmux integration.
+`xlurm` is a small Linux-only, multi-user scheduler for NVIDIA, Moore Threads,
+MetaX, Ascend, PPU, and HCU accelerators. It is written in Rust and communicates
+over a local Unix socket. Keep the implementation deliberately small: there is
+no async runtime, database, HTTP service, web UI, or tmux integration.
 
 The main binaries are `xlurm`, `xrun`, `xbatch`, `xqueue`, `xcancel`, and
 `xinfo`. The wrappers in `src/bin/` all enter the shared CLI implementation.

@@ -33,7 +33,7 @@ xcancel 3                                # 取消任务及其进程组
 | --- | --- |
 | `xrun [选项] COMMAND [ARGS...]` | 前台等待任务，转发 stdout/stderr，Ctrl-C 取消任务 |
 | `xbatch [选项] SCRIPT [ARGS...]` | 保存脚本快照后提交，不必等资源空闲 |
-| `xqueue [JOB_ID]` | 查看自己最新 100 条活动任务及启动时间、等待/执行时长；传 ID 查看自己任务的详细结果 |
+| `xqueue [JOB_ID]` | 查看全主机最新 100 条活动任务及启动时间、等待/执行时长；传 ID 查看自己任务的详细结果 |
 | `xcancel JOB_ID` | 取消任务及其进程组，等价于 `xqueue --cancel JOB_ID` |
 | `xinfo` | 显示设备、外部占用、分配情况 |
 | `sudo xlurm clean` | 调度器已停止且没有运行中任务时删除全部日志 |
@@ -43,6 +43,8 @@ xcancel 3                                # 取消任务及其进程组
 ```bash
 xrun --device ascend -g 2 python train_npu.py
 xrun --device ppu -g 1 python train.py
+xrun --device metax -i 1 python train.py
+xrun --device hcu -i 1 python train.py
 xrun --device nvidia -g 1 -t 3600 python train.py --epochs 10
 xrun -i 0,2 -g 2 python train.py
 xrun --device nvidia -x 0,2 -g 1 python train.py
@@ -79,6 +81,7 @@ sudo xlurm start --backend ascend            # 只管理 Ascend
 sudo xlurm start --backend mtt               # 只管理摩尔线程 GPU
 sudo xlurm start --backend metax             # 只管理 MetaX GPU
 sudo xlurm start --backend ppu               # 只管理 T-Head PPU
+sudo xlurm start --backend hcu               # 只管理海光 HCU
 sudo xlurm start --backend ascend --exclude-device-ids 2,3  # 临时禁用疑似故障卡
 sudo xlurm start --backend none              # CPU 模式，无需驱动
 sudo xlurm daemon --backend auto --max-running 32  # 前台运行
@@ -135,7 +138,7 @@ xrun / xbatch / xqueue / xcancel / xinfo
                     日志 + 原子结果文件
 ```
 
-- 调度器按提交顺序扫描，资源足够就启动；大任务等资源时允许后面的小任务先跑。最多同时运行 32 个任务，可用 `--max-running` 调整。
+- 调度器优先尝试申请设备数更多的排队任务，设备数相同则保持提交顺序；资源足够就启动，大任务等资源时允许小任务先跑。最多同时运行 32 个任务，可用 `--max-running` 调整。
 - 每个设备槽独占分配，单个任务只使用一个厂商的设备池。自动选择优先尝试 NVIDIA、Ascend、摩尔线程、MetaX、PPU，再尝试 HCU。多芯片 Ascend 卡按独立计算芯片分配。
 - NVIDIA 用 `nvidia-smi` 发现与监测，按 GPU UUID 设置 `CUDA_VISIBLE_DEVICES`，避免 CUDA 与管理工具索引顺序不同。
 - Ascend 默认只加载一次 `libdcmi.so`，直接通过 DCMI v2 查询逻辑设备 ID、各芯片健康状态及进程占用，保持单线程调度。按逻辑 ID 设置 `ASCEND_RT_VISIBLE_DEVICES`，DCMI v2 直接按逻辑 ID 查询，无需物理卡号/芯片号映射。Ascend 后端要求驱动库、v2 符号可用且初始化成功，失败会报告设备发现错误。自动发现后端时，发现错误会跳过 Ascend；显式指定 `--backend ascend` 时，发现错误会阻止启动。监测失败或设备不存在时显示 `unknown` 并暂停分配，健康状态非零时显示 `unhealthy` 并排除该芯片。
@@ -159,11 +162,11 @@ xrun / xbatch / xqueue / xcancel / xinfo
 | 排除/恢复设备调度 | 不允许 | 允许 |
 | 启停共享调度器 | 不允许 | 允许 |
 
-身份来自内核 `SO_PEERCRED`，客户端无法通过 JSON 或 `USER` 环境变量指定任务属主。执行前重新解析本机账户及附加组，依次设置 supplementary groups、real/effective/saved GID 和 UID，再进入用户工作目录并执行命令。用户拥有的文件按该用户权限读写；Ascend/NVIDIA 驱动所需的用户组权限也得以保留。
+身份来自内核 `SO_PEERCRED`，客户端无法通过 JSON 或 `USER` 环境变量指定任务属主。执行前重新解析本机账户及附加组，依次设置 supplementary groups、real/effective/saved GID 和 UID，再进入用户工作目录并执行命令。用户拥有的文件按该用户权限读写；驱动访问所需的附加组权限也得以保留。
 
-任务设置 `no_new_privs`，因此任务内不能依赖 sudo/setuid 程序提权。所有用户都能查看全主机队列概要，其中只含任务名、属主、资源和状态；命令、脚本和环境绝不会出现在概要中。任务详情、日志和取消操作仍仅限任务所有者或 root。调度仍是简单的按提交顺序尝试分配，不增加用户配额、优先级或计费系统。
+任务设置 `no_new_privs`，因此任务内不能依赖 sudo/setuid 程序提权。所有用户都能查看全主机队列概要，其中只含任务名、属主、资源和状态；命令、脚本和环境绝不会出现在概要中。任务详情、日志和取消操作仍仅限任务所有者或 root。调度按申请设备数优先，不增加用户配额、可配置优先级类别或计费系统。
 
-这里提供的是多用户身份与控制权限；GPU/NPU 使用范围通过可见设备环境变量约定，尚未通过 cgroup 强制限制设备节点访问。绕过调度器直接用卡的程序仍可能竞争设备。不支持 MIG、显存切分或故意脱离进程组的后台服务。CPU 任务会将两类设备可见变量设为 `-1`。
+这里提供的是多用户身份与控制权限；GPU/NPU 使用范围通过可见设备环境变量约定，尚未通过 cgroup 强制限制设备节点访问。绕过调度器直接用卡的程序仍可能竞争设备。不支持 MIG、显存切分或故意脱离进程组的后台服务。CPU 任务会将所有支持的设备可见变量设为 `-1`。
 
 ## 开发
 
@@ -183,6 +186,6 @@ sudo python3 tests/multiuser.py
 
 `tests/multiuser.py` 使用现有 `nobody`、`daemon` 两个账户，验证真实 UID/GID/附加组切换、输出文件属主、私有队列及越权拒绝；使用临时目录和 CPU 任务，不修改账户配置。开发时可通过 `XLURM_HOME=/tmp/my-xlurm xlurm daemon --backend none` 启动仅当前账户可访问的非 root 测试实例。
 
-接口语义参考：[CUDA 可见设备](https://docs.nvidia.com/deploy/topics/topic_5_2_1.html)、[Ascend 可见设备](https://www.hiascend.com/document/detail/en/canncommercial/850/maintenref/envvar/envref_07_0028.html)、[Linux Unix socket 凭据](https://man7.org/linux/man-pages/man7/unix.7.html)。
+接口语义参考：[CUDA 可见设备](https://docs.nvidia.com/deploy/topics/topic_5_2_1.html)、[Ascend 可见设备](https://www.hiascend.com/document/detail/en/canncommercial/850/maintenref/envvar/envref_07_0028.html)、[MetaX MXSML API](https://github.com/MetaX-MACA/go-mxsml)、[HCU SMI API](https://github.com/HYGON-AI/hcu-dcgm)、[Linux Unix socket 凭据](https://man7.org/linux/man-pages/man7/unix.7.html)。
 
 本项目深受 [gflow](https://github.com/AndPuQing/gflow) 启发。

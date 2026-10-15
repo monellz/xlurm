@@ -35,7 +35,7 @@ xcancel 3                                # Cancel a task and its process group
 | --- | --- |
 | `xrun [OPTIONS] COMMAND [ARGS...]` | Wait for a task in the foreground, forward stdout/stderr, and cancel on Ctrl-C |
 | `xbatch [OPTIONS] SCRIPT [ARGS...]` | Snapshot and submit a script without waiting for resources |
-| `xqueue [JOB_ID]` | Show your latest 100 active tasks with start, wait, and run times; with an ID, show detailed results for your task |
+| `xqueue [JOB_ID]` | Show the latest 100 active tasks across users with start, wait, and run times; with an ID, show detailed results for your task |
 | `xcancel JOB_ID` | Cancel a task and its process group; equivalent to `xqueue --cancel JOB_ID` |
 | `xinfo` | Show devices, external usage, and allocations |
 | `sudo xlurm clean` | Remove all logs while the scheduler is stopped and no task is running |
@@ -45,6 +45,8 @@ Resource options include `-g/--gpus N` (also `--devices`, default `1`), `-i/--de
 ```bash
 xrun --device ascend -g 2 python train_npu.py
 xrun --device ppu -g 1 python train.py
+xrun --device metax -i 1 python train.py
+xrun --device hcu -i 1 python train.py
 xrun --device nvidia -g 1 -t 3600 python train.py --epochs 10
 xrun -i 0,2 -g 2 python train.py
 xrun --device nvidia -x 0,2 -g 1 python train.py
@@ -81,6 +83,7 @@ sudo xlurm start --backend ascend            # Manage only Ascend
 sudo xlurm start --backend mtt               # Manage only Moore Threads GPUs
 sudo xlurm start --backend metax             # Manage only MetaX GPUs
 sudo xlurm start --backend ppu               # Manage only T-Head PPU devices
+sudo xlurm start --backend hcu               # Manage only Hygon HCU devices
 sudo xlurm start --backend ascend --exclude-device-ids 2,3  # Temporarily disable suspect cards
 sudo xlurm start --backend none              # CPU mode; no device driver required
 sudo xlurm daemon --backend auto --max-running 32  # Run in the foreground
@@ -137,7 +140,7 @@ xrun / xbatch / xqueue / xcancel / xinfo
                     Logs + atomic result file
 ```
 
-- The scheduler scans tasks in submission order and starts tasks when resources are available; a later small task may run while a larger task waits. At most 32 tasks run at once, configurable with `--max-running`.
+- The scheduler tries pending tasks requesting more devices first, keeping submission order for equal counts. It starts each task when resources are available; smaller tasks may run while a larger task waits. At most 32 tasks run at once, configurable with `--max-running`.
 - Each device slot is allocated exclusively, and a task uses only one vendor's device pool. Automatic selection tries NVIDIA, then Ascend, Moore Threads, MetaX, PPU, and HCU. Multi-chip Ascend cards are allocated by individual compute chip.
 - NVIDIA devices are discovered and monitored with `nvidia-smi`; `CUDA_VISIBLE_DEVICES` is set by GPU UUID to avoid differences between CUDA and management-tool index order.
 - Ascend defaults to loading `libdcmi.so` once and querying logical device IDs, per-chip health, and process occupancy directly through DCMI v2, using a single-threaded scheduler. `ASCEND_RT_VISIBLE_DEVICES` uses logical IDs; DCMI v2 queries use these logical IDs directly, without physical card/chip mappings. The Ascend backend requires the library, v2 symbols, and successful initialization; failures are reported as discovery errors. Discovery errors exclude Ascend in automatic backend discovery and stop startup when `--backend ascend` is selected; monitoring failures or missing devices show `unknown` and pause allocation. Nonzero health shows `unhealthy` and excludes the chip from allocation.
@@ -161,11 +164,11 @@ xrun / xbatch / xqueue / xcancel / xinfo
 | Exclude/include devices | Not allowed | Allowed |
 | Start/stop the shared scheduler | Not allowed | Allowed |
 
-Identity comes from the kernel's `SO_PEERCRED`; clients cannot choose task ownership through JSON or the `USER` environment variable. Before execution, the scheduler re-resolves the local account and supplementary groups, sets supplementary groups plus real/effective/saved GID and UID, then enters the user's working directory and executes the command. Files owned by the user are accessed with that user's permissions, and groups required by Ascend/NVIDIA drivers are preserved.
+Identity comes from the kernel's `SO_PEERCRED`; clients cannot choose task ownership through JSON or the `USER` environment variable. Before execution, the scheduler re-resolves the local account and supplementary groups, sets supplementary groups plus real/effective/saved GID and UID, then enters the user's working directory and executes the command. Files owned by the user are accessed with that user's permissions, and supplementary groups required for driver access are preserved.
 
-Tasks set `no_new_privs`, so a task cannot rely on sudo or setuid programs for privilege escalation. Queue summaries are host-wide and contain only the task name, owner, resources, and status. Commands, scripts, and environments are never included; task details, logs, and cancellation remain owner-only. Scheduling remains a simple submission-order allocation attempt and does not add quotas, priorities, or billing.
+Tasks set `no_new_privs`, so a task cannot rely on sudo or setuid programs for privilege escalation. Queue summaries are host-wide and contain only the task name, owner, resources, and status. Commands, scripts, and environments are never included; task details, logs, and cancellation are restricted to the owner or root. Scheduling prioritizes requested device count, with no user quotas, configurable priority classes, or billing.
 
-This project provides multi-user identity and control permissions. GPU/NPU access is described through visible-device environment variables and is not yet enforced with cgroups or device-node restrictions. Programs that bypass the scheduler can still compete for devices. MIG, memory partitioning, and intentionally detached background services are unsupported. CPU tasks set both device visibility variables to `-1`.
+This project provides multi-user identity and control permissions. GPU/NPU access is described through visible-device environment variables and is not yet enforced with cgroups or device-node restrictions. Programs that bypass the scheduler can still compete for devices. MIG, memory partitioning, and intentionally detached background services are unsupported. CPU tasks set all supported device visibility variables to `-1`.
 
 ## Development
 
@@ -186,6 +189,6 @@ End-to-end tests use simulated drivers to cover NVIDIA, Ascend, MetaX, HCU, and 
 
 `tests/multiuser.py` uses the existing `nobody` and `daemon` accounts to verify real UID/GID/supplementary-group switching, output-file ownership, private queues, and unauthorized access rejection. It uses temporary directories and CPU tasks without modifying account configuration. For development, start a non-root test instance accessible only to the current user with `XLURM_HOME=/tmp/my-xlurm xlurm daemon --backend none`.
 
-Interface semantics reference [CUDA_VISIBLE_DEVICES](https://docs.nvidia.com/deploy/topics/topic_5_2_1.html), [Ascend visible devices](https://www.hiascend.com/document/detail/en/canncommercial/850/maintenref/envvar/envref_07_0028.html), and [Linux Unix socket credentials](https://man7.org/linux/man-pages/man7/unix.7.html).
+Interface semantics reference [CUDA_VISIBLE_DEVICES](https://docs.nvidia.com/deploy/topics/topic_5_2_1.html), [Ascend visible devices](https://www.hiascend.com/document/detail/en/canncommercial/850/maintenref/envvar/envref_07_0028.html), [MetaX MXSML APIs](https://github.com/MetaX-MACA/go-mxsml), [HCU SMI APIs](https://github.com/HYGON-AI/hcu-dcgm), and [Linux Unix socket credentials](https://man7.org/linux/man-pages/man7/unix.7.html).
 
 This project was strongly inspired by [gflow](https://github.com/AndPuQing/gflow).
