@@ -22,6 +22,7 @@ The main binaries are `xlurm`, `xrun`, `xbatch`, `xqueue`, `xcancel`, and
 - `src/device/ascend.rs`: Ascend discovery and monitoring through DCMI v2.
 - `src/device/hcu.rs`: HCU discovery and process occupancy through SMI.
 - `src/device/metax.rs`: MetaX discovery, availability, and process occupancy through MXSML.
+- `src/device/ppu.rs`: PPU discovery and process occupancy through HGML v2.
 - `src/auth.rs`: Unix peer credentials, account lookup, and authorization.
 - `src/storage.rs`: state paths, permissions, locking, and atomic JSON writes.
 - `tests/e2e.rs`: end-to-end behavior using simulated accelerator drivers.
@@ -39,7 +40,7 @@ cargo clippy --locked --all-targets -- -D warnings
 ```
 
 Ordinary tests do not require root or accelerator hardware. The fixtures in
-`tests/fixtures/` simulate driver tools and DCMI, MXSML, and HCU SMI libraries.
+`tests/fixtures/` simulate driver tools and DCMI, MXSML, HGML, and HCU SMI libraries.
 
 For changes to authentication, privilege dropping, file ownership, socket
 permissions, or cross-user access, also run the following when root access and

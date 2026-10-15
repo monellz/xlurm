@@ -106,6 +106,8 @@ Ascend 自动使用 DCMI v2，不使用 v1 接口。Ascend 后端要求驱动库
 
 MetaX 库依次从 `/opt/mxdriver/lib/libmxsml.so`、`/opt/maca/lib/libmxsml.so`、`/opt/mxn100/lib/libmxsml.so`、动态加载器的 `libmxsml.so` 搜索路径加载。管理员可在守护进程环境设置 `XLURM_MXSML_LIBRARY=/absolute/path/libmxsml.so` 选择其他可信驱动库并禁用回退搜索。库须提供 MXSML 扩展接口及 `mxSmlGetDeviceUnavailableReason`。缺少库或符号、初始化或设备发现失败时，自动模式跳过 MetaX，显式指定 `--backend metax` 时阻止启动。任务提交者的环境不能改变该配置。
 
+PPU 库依次从 `/usr/local/PPU_SDK/lib/libhgml.so`、`/usr/local/PPU_SDK/targets/x86_64-linux/lib/libhgml.so`、动态加载器的 `libhgml.so` 搜索路径加载。管理员可在守护进程环境设置 `XLURM_HGML_LIBRARY=/absolute/path/libhgml.so` 选择其他可信驱动库并禁用回退搜索。库须提供 HGML v2 初始化、发现和计算进程接口；失败时自动模式跳过 PPU，显式指定 `--backend ppu` 时阻止启动。任务提交者的环境不能改变该配置。
+
 HCU 库依次从 `/opt/hyhal/lib/librocm_smi64.so`、`/opt/dtk/.hyhal/rocm_smi/lib/librocm_smi64.so`、动态加载器的 `librocm_smi64.so` 搜索路径加载。管理员可在守护进程环境设置 `XLURM_HCU_SMI_LIBRARY=/absolute/path/librocm_smi64.so` 和 `XLURM_HCU_HEALTH_TOOL=/absolute/path/hy-smi` 指定可信库与健康检查程序。显式路径禁用对应搜索，仅在守护进程启动时生效，不读取任务提交者的环境。缺少符号或初始化失败会报告 HCU 发现错误。
 
 默认共享状态目录为 `/var/lib/xlurm`。所有用户自动连接这里的 Unix socket，无需用户各自启动服务。可以通过 `XLURM_HOME` 指定其他由管理员持有的短绝对路径，所有客户端和调度器必须使用同一路径。没有配置文件，也没有网络监听端口。
@@ -144,9 +146,9 @@ xrun / xbatch / xqueue / xcancel / xinfo
 - Ascend 默认只加载一次 `libdcmi.so`，直接通过 DCMI v2 查询逻辑设备 ID、各芯片健康状态及进程占用，保持单线程调度。按逻辑 ID 设置 `ASCEND_RT_VISIBLE_DEVICES`，DCMI v2 直接按逻辑 ID 查询，无需物理卡号/芯片号映射。Ascend 后端要求驱动库、v2 符号可用且初始化成功，失败会报告设备发现错误。自动发现后端时，发现错误会跳过 Ascend；显式指定 `--backend ascend` 时，发现错误会阻止启动。监测失败或设备不存在时显示 `unknown` 并暂停分配，健康状态非零时显示 `unhealthy` 并排除该芯片。
 - 摩尔线程用 `mthreads-gmi --list-gpus` 发现设备并保存 UUID；通过 `mthreads-gmi` 进程表识别外部占用。任务设置 `MTHREADS_VISIBLE_DEVICES` UUID 和 `MUSA_VISIBLE_DEVICES` 设备序号，显示简写为 `mtt`。
 - MetaX 只加载一次 `libmxsml.so`，通过 MXSML API 发现设备索引、名称和 UUID，并查询设备可用性及逐卡计算进程，不再需要 `mx-smi`。不可用设备显示 `unhealthy`；查询失败、无效返回值或 UUID 变化时显示 `unknown`，暂停该卡的分配。任务将已分配设备索引写入 `CUDA_VISIBLE_DEVICES` 和 `MACA_VISIBLE_DEVICES`；显示简写为 `mx`。
-- T-Head PPU 用 `ppu-smi --query-ppu` 按 UUID 发现设备，并通过 `--query-compute-apps` 检查外部计算进程。任务将已分配 UUID 写入 `CUDA_VISIBLE_DEVICES`；显示简写为 `ppu`。
+- T-Head PPU 通过 SDK 的 `libhgml.so` HGML v2 API 发现设备索引、UUID 和名称，并逐卡查询计算进程，不再需要 `ppu-smi`。查询失败、无效返回值或 UUID 变化时显示 `unknown`，暂停该卡的分配。任务将已分配 UUID 写入 `CUDA_VISIBLE_DEVICES`；显示简写为 `ppu`。
 - Hygon HCU 通过驱动的 `librocm_smi64.so` API 按 Unique ID 发现设备并查询进程占用，不再依赖 JSON 输出和 PATH。综合健康检查仍使用 `hy-smi --healthcheck`，优先选择 `/opt/dtk/.hyhal/bin/hy-smi`，再查 PATH。不健康设备不参与分配，探测失败会暂停分配。`ROCR_VISIBLE_DEVICES` 选择分配的设备索引，`HIP_VISIBLE_DEVICES` 和 `CUDA_VISIBLE_DEVICES` 使用过滤后的 `0..N-1` 编号。这些环境变量控制运行时可见性，不构成访问权限隔离。依赖进程查询检测外来负载前，需在实际负载下验证驱动的上报能力；成功返回空列表不能证明不存在驱动漏报的进程。显示简写为 `hcu`。
-- 每两秒检查驱动报告的外部计算进程；有占用的设备暂不分配，查询失败显示 `unknown` 并暂停分配。单次驱动**命令**调用最多等待 3 秒；DCMI、MXSML 和 HCU SMI 接口在调度器中同步调用，依赖驱动自身的返回时间，没有应用层超时。
+- 每两秒检查驱动报告的外部计算进程；有占用的设备暂不分配，查询失败显示 `unknown` 并暂停分配。单次驱动**命令**调用最多等待 3 秒；DCMI、MXSML、HGML 和 HCU SMI 接口在调度器中同步调用，依赖驱动自身的返回时间，没有应用层超时。
 - 客户端连接会立即唤醒空闲的调度器；队列响应使用缓冲写入，避免历史任务较多时产生大量系统调用。调度器保持单线程。
 - worker 持有继承的文件锁，调度器重启后通过锁接管任务；不靠裸 PID 判断任务是否存活。退出结果通过原子文件写入。
 - 取消先向进程组发 SIGTERM，一秒后仍未退出则发 SIGKILL。任务主进程结束时清理同组后台子进程，并回收孤儿进程，然后释放设备。
@@ -182,10 +184,10 @@ cargo build --bins --locked
 sudo python3 tests/multiuser.py
 ```
 
-端到端测试通过模拟驱动覆盖 NVIDIA、Ascend、MetaX、HCU 和 PPU，验证独占分配、外部占用/查询失败、前台退出码、脚本快照、取消、超时和调度器崩溃接管；权限测试覆盖属主伪造、跨用户查询/读日志/取消、管理员权限和队列隐私。普通 `cargo test` 不需要 root 或加速卡硬件；DCMI、MXSML 和 HCU SMI 测试会编译模拟动态库，需要 C 编译器（`cc`）。
+端到端测试通过模拟驱动覆盖 NVIDIA、Ascend、MetaX、HCU 和 PPU，验证独占分配、外部占用/查询失败、前台退出码、脚本快照、取消、超时和调度器崩溃接管；权限测试覆盖属主伪造、跨用户查询/读日志/取消、管理员权限和队列隐私。普通 `cargo test` 不需要 root 或加速卡硬件；DCMI、MXSML、HGML 和 HCU SMI 测试会编译模拟动态库，需要 C 编译器（`cc`）。
 
 `tests/multiuser.py` 使用现有 `nobody`、`daemon` 两个账户，验证真实 UID/GID/附加组切换、输出文件属主、私有队列及越权拒绝；使用临时目录和 CPU 任务，不修改账户配置。开发时可通过 `XLURM_HOME=/tmp/my-xlurm xlurm daemon --backend none` 启动仅当前账户可访问的非 root 测试实例。
 
-接口语义参考：[CUDA 可见设备](https://docs.nvidia.com/deploy/topics/topic_5_2_1.html)、[Ascend 可见设备](https://www.hiascend.com/document/detail/en/canncommercial/850/maintenref/envvar/envref_07_0028.html)、[MetaX MXSML API](https://github.com/MetaX-MACA/go-mxsml)、[HCU SMI API](https://github.com/HYGON-AI/hcu-dcgm)、[Linux Unix socket 凭据](https://man7.org/linux/man-pages/man7/unix.7.html)。
+接口语义参考：[CUDA 可见设备](https://docs.nvidia.com/deploy/topics/topic_5_2_1.html)、[Ascend 可见设备](https://www.hiascend.com/document/detail/en/canncommercial/850/maintenref/envvar/envref_07_0028.html)、[MetaX MXSML API](https://github.com/MetaX-MACA/go-mxsml)、[HCU SMI API](https://github.com/HYGON-AI/hcu-dcgm)、[PPU 管理库](https://help.aliyun.com/en/document_detail/2996754.html)、[Linux Unix socket 凭据](https://man7.org/linux/man-pages/man7/unix.7.html)。
 
 本项目深受 [gflow](https://github.com/AndPuQing/gflow) 启发。

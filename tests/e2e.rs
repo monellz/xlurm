@@ -48,6 +48,7 @@ impl Harness {
             .env("XLURM_HOME", self.dir.path().join("state"))
             .env("XLURM_DCMI_LIBRARY", self.dir.path().join("libdcmi.so"))
             .env("XLURM_MXSML_LIBRARY", self.dir.path().join("libmxsml.so"))
+            .env("XLURM_HGML_LIBRARY", self.dir.path().join("libhgml.so"))
             .env(
                 "XLURM_HCU_SMI_LIBRARY",
                 self.dir.path().join("libhcu_smi.so"),
@@ -178,6 +179,21 @@ impl Harness {
             .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mxsml.c"))
             .output()
             .expect("MXSML fixture requires cc");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn hgml(&self, flags: &[&str]) {
+        let output = Command::new("cc")
+            .args(flags)
+            .args(["-shared", "-fPIC", "-Wall", "-Wextra", "-Werror", "-o"])
+            .arg(self.dir.path().join("libhgml.so"))
+            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hgml.c"))
+            .output()
+            .expect("HGML fixture requires cc");
         assert!(
             output.status.success(),
             "{}",
@@ -1139,59 +1155,153 @@ fn metax_mxsml_startup_errors_fail_closed() {
 }
 
 #[test]
-fn ppu_devices_are_discovered_exclusively_and_fail_closed() {
+fn ppu_hgml_discovers_and_monitors_without_cli() {
     let mut h = Harness::new("ppu", 2);
-    h.drivers();
-    symlink(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ppu-smi"),
-        h.dir.path().join("bin/ppu-smi"),
-    )
-    .unwrap();
+    h.hgml(&[]);
     fs::write(h.dir.path().join("ppu-busy"), "").unwrap();
     h.start();
-
     let devices: Vec<Value> = serde_json::from_slice(&h.run("xinfo", &["--json"]).stdout).unwrap();
     assert_eq!(devices.len(), 2);
     assert_eq!(devices[0]["device"]["kind"], "ppu");
     assert_eq!(devices[0]["device"]["visible"], "GPU-ppu-0");
+    assert_eq!(devices[0]["device"]["name"], "PPU-ZW810E");
+    assert_eq!(devices[0]["status"], "idle");
     assert_eq!(devices[1]["status"], "busy");
-
+    let pending = h.submit(&["--device", "ppu", "-i", "1", "--wrap", "true"]);
+    assert_eq!(h.job(pending)["state"], "PENDING");
+    fs::remove_file(h.dir.path().join("ppu-busy")).unwrap();
+    h.wait_state(pending, "COMPLETED");
+    for (ids, expected) in [("1", "GPU-ppu-1"), ("1,0", "GPU-ppu-1,GPU-ppu-0")] {
+        let run = h.run(
+            "xrun",
+            &[
+                "--device",
+                "ppu",
+                "-i",
+                ids,
+                "sh",
+                "-c",
+                "printf '%s' \"$CUDA_VISIBLE_DEVICES\"",
+            ],
+        );
+        assert_eq!(String::from_utf8(run.stdout).unwrap(), expected);
+    }
+    assert!(!h.dir.path().join("bin/ppu-smi").exists());
+    // Both vendor UUID prefixes remain valid for runtime visibility.
+    let mut daemon = h.daemon.take().unwrap();
+    unsafe {
+        libc::kill(daemon.id() as i32, libc::SIGTERM);
+    }
+    daemon.wait().unwrap();
+    fs::write(h.dir.path().join("ppu-prefix"), "").unwrap();
+    h.start();
     let run = h.run(
         "xrun",
         &[
             "--device",
             "ppu",
             "-i",
-            "0",
-            "--",
+            "1",
             "sh",
             "-c",
             "printf '%s' \"$CUDA_VISIBLE_DEVICES\"",
         ],
     );
-    assert_eq!(String::from_utf8(run.stdout).unwrap(), "GPU-ppu-0");
+    assert_eq!(String::from_utf8(run.stdout).unwrap(), "PPU-ppu-1");
+}
 
-    fs::write(h.dir.path().join("ppu-probe-error"), "").unwrap();
-    let deadline = Instant::now() + Duration::from_secs(8);
-    loop {
-        let devices: Vec<Value> =
-            serde_json::from_slice(&h.run("xinfo", &["--json"]).stdout).unwrap();
-        if devices.iter().all(|device| device["status"] == "unknown") {
-            break;
+#[test]
+fn ppu_hgml_failures_are_per_device_and_recover() {
+    let mut h = Harness::new("ppu", 2);
+    h.hgml(&[]);
+    h.start();
+    for marker in [
+        "ppu-handle-error",
+        "ppu-null-handle",
+        "ppu-uuid-error",
+        "ppu-uuid-changed",
+        "ppu-probe-error",
+        "ppu-insufficient-capacity",
+        "ppu-invalid-process-count",
+        "ppu-invalid-pid",
+    ] {
+        if marker == "ppu-invalid-pid" {
+            fs::write(h.dir.path().join("ppu-busy"), "").unwrap();
         }
-        assert!(
-            Instant::now() < deadline,
-            "failed PPU probe did not become unknown"
+        fs::write(h.dir.path().join(marker), "").unwrap();
+        let expected = "unknown";
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            let devices: Vec<Value> =
+                serde_json::from_slice(&h.run("xinfo", &["--json"]).stdout).unwrap();
+            if devices[1]["status"] == expected {
+                assert_eq!(devices[0]["status"], "idle");
+                break;
+            }
+            assert!(Instant::now() < deadline, "{marker}: {devices:?}");
+            sleep(Duration::from_millis(30));
+        }
+        let pending = h.submit(&["--device", "ppu", "-i", "1", "--wrap", "true"]);
+        assert_eq!(h.job(pending)["state"], "PENDING");
+        h.wait_state(
+            h.submit(&["--device", "ppu", "-i", "0", "--wrap", "true"]),
+            "COMPLETED",
         );
-        sleep(Duration::from_millis(100));
+        fs::remove_file(h.dir.path().join(marker)).unwrap();
+        if marker == "ppu-invalid-pid" {
+            fs::remove_file(h.dir.path().join("ppu-busy")).unwrap();
+        }
+        h.wait_state(pending, "COMPLETED");
     }
-    let pending = h.run("xbatch", &["--device", "ppu", "-g", "1", "--wrap", "true"]);
-    let id = String::from_utf8(pending.stdout)
-        .unwrap()
-        .trim()
-        .parse::<u64>()
+}
+
+#[test]
+fn ppu_hgml_startup_errors_fail_closed() {
+    let h = Harness::new("ppu", 1);
+    h.hgml(&[]);
+    for marker in [
+        "ppu-init-error",
+        "ppu-count-error",
+        "ppu-invalid-count",
+        "ppu-zero-count",
+        "ppu-handle-error",
+        "ppu-null-handle",
+        "ppu-uuid-error",
+        "ppu-invalid-uuid",
+        "ppu-duplicate-id",
+        "ppu-name-error",
+        "ppu-unterminated-name",
+        "ppu-invalid-utf8",
+    ] {
+        fs::write(h.dir.path().join(marker), "").unwrap();
+        let output = h
+            .command("xlurm")
+            .args(["daemon", "--backend", "ppu"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{marker}");
+        assert!(!h.dir.path().join("state/xlurm.sock").exists());
+        fs::remove_file(h.dir.path().join(marker)).unwrap();
+    }
+    h.hgml(&["-DOMIT_PROCESS_API"]);
+    let output = h
+        .command("xlurm")
+        .args(["daemon", "--backend", "ppu"])
+        .output()
         .unwrap();
-    assert_eq!(h.job(id)["state"], "PENDING");
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("missing hgmlDeviceGetComputeRunningProcesses_v2")
+    );
+    fs::remove_file(h.dir.path().join("libhgml.so")).unwrap();
+    let output = h
+        .command("xlurm")
+        .args(["daemon", "--backend", "ppu"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot load PPU HGML"));
 }
 
 #[test]

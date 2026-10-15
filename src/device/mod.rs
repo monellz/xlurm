@@ -1,6 +1,7 @@
 mod ascend;
 mod hcu;
 mod metax;
+mod ppu;
 
 use crate::model::{Device, Kind};
 use anyhow::{Context, Result, bail, ensure};
@@ -36,7 +37,7 @@ pub struct Inventory {
     ascend: Option<ascend::Dcmi>,
     mthreads: PathBuf,
     metax: Option<metax::Mxsml>,
-    ppu: PathBuf,
+    ppu: Option<ppu::Hgml>,
     hcu: Option<hcu::Smi>,
     hcu_health: PathBuf,
 }
@@ -50,7 +51,7 @@ impl Inventory {
             ascend: None,
             mthreads: locate("mthreads-gmi", &[]),
             metax: None,
-            ppu: locate("ppu-smi", &["/usr/local/PPU_SDK/ppu-smi/bin/ppu-smi"]),
+            ppu: None,
             hcu: None,
             hcu_health: hcu::health_tool(),
         };
@@ -88,11 +89,12 @@ impl Inventory {
                     eprintln!("MetaX: using MXSML API");
                     Ok(devices)
                 }),
-                Kind::Ppu => output(
-                    &inventory.ppu,
-                    &["--query-ppu=index,uuid,name", "--format=csv"],
-                )
-                .and_then(|text| parse_ppu(&text)),
+                Kind::Ppu => ppu::Hgml::load().and_then(|driver| {
+                    let devices = driver.discover()?;
+                    inventory.ppu = Some(driver);
+                    eprintln!("PPU: using HGML API");
+                    Ok(devices)
+                }),
                 Kind::Hcu => hcu::Smi::load().and_then(|driver| {
                     let devices = driver.discover()?;
                     inventory.hcu = Some(driver);
@@ -130,12 +132,6 @@ impl Inventory {
             .iter()
             .any(|d| d.kind == Kind::Mthreads)
             .then(|| output(&self.mthreads, &[]));
-        let ppu_busy = self.devices.iter().any(|d| d.kind == Kind::Ppu).then(|| {
-            output(
-                &self.ppu,
-                &["--query-compute-apps=uuid,pid", "--format=csv"],
-            )
-        });
         let hcu_busy = self.devices.iter().any(|d| d.kind == Kind::Hcu).then(|| {
             self.hcu
                 .as_ref()
@@ -183,11 +179,14 @@ impl Inventory {
                     self.status.insert(device.key(), status.into());
                     continue;
                 }
-                Kind::Ppu => ppu_busy
-                    .as_ref()
-                    .and_then(|result| result.as_ref().ok())
-                    .and_then(|text| ppu_busy_devices(text))
-                    .map(|busy| !busy.contains(&device.visible)),
+                Kind::Ppu => {
+                    let status = self
+                        .ppu
+                        .as_ref()
+                        .map_or("unknown", |driver| driver.status(device));
+                    self.status.insert(device.key(), status.into());
+                    continue;
+                }
                 Kind::Hcu => {
                     let healthy = hcu_healthy
                         .as_ref()
@@ -396,60 +395,6 @@ fn mthreads_busy_devices(text: &str) -> Option<HashSet<u32>> {
     saw_process_header.then_some(busy)
 }
 
-fn parse_ppu(text: &str) -> Result<Vec<Device>> {
-    let mut lines = text.lines();
-    let header = lines.next().context("missing PPU-SMI CSV header")?;
-    ensure!(
-        header
-            .split(',')
-            .map(str::trim)
-            .eq(["index", "uuid", "name"]),
-        "invalid PPU-SMI CSV header"
-    );
-    let mut devices = Vec::new();
-    for line in lines.filter(|line| !line.trim().is_empty()) {
-        let fields: Vec<_> = line.splitn(3, ',').map(str::trim).collect();
-        ensure!(
-            fields.len() == 3 && ppu_uuid(fields[1]) && !fields[2].is_empty(),
-            "invalid PPU-SMI device row"
-        );
-        devices.push(Device {
-            kind: Kind::Ppu,
-            id: fields[0].parse().context("invalid PPU device index")?,
-            visible: fields[1].into(),
-            name: fields[2].into(),
-            npu: None,
-            chip: None,
-        });
-    }
-    validate(devices)
-}
-
-fn ppu_busy_devices(text: &str) -> Option<HashSet<String>> {
-    let mut lines = text.lines();
-    let header = lines.next()?;
-    let columns: Vec<_> = header.split(',').map(str::trim).collect();
-    let uuid_column = columns.iter().position(|column| *column == "uuid")?;
-    let pid_column = columns.iter().position(|column| *column == "pid")?;
-    let mut busy = HashSet::new();
-    for line in lines.filter(|line| !line.trim().is_empty()) {
-        let fields: Vec<_> = line.split(',').map(str::trim).collect();
-        let uuid = *fields.get(uuid_column)?;
-        let pid = fields.get(pid_column)?.parse::<u32>().ok()?;
-        if !ppu_uuid(uuid) {
-            return None;
-        }
-        if pid > 0 {
-            busy.insert(uuid.to_string());
-        }
-    }
-    Some(busy)
-}
-
-fn ppu_uuid(value: &str) -> bool {
-    value.starts_with("GPU-") || value.starts_with("PPU-")
-}
-
 fn validate(devices: Vec<Device>) -> Result<Vec<Device>> {
     if devices.is_empty() {
         bail!("no compute devices discovered");
@@ -471,21 +416,6 @@ mod tests {
         let devices = parse_nvidia("3, GPU-abc, NVIDIA H100\n").unwrap();
         assert_eq!(devices[0].visible, "GPU-abc");
         assert!(parse_nvidia("driver failure").is_err());
-    }
-
-    #[test]
-    fn ppu_supports_driver_uuid_prefixes_and_tracks_busy_uuid() {
-        let devices =
-            parse_ppu("index, uuid, name\n0, GPU-abc, PPU-ZW810E\n1, PPU-def, PPU-ZW810E\n")
-                .unwrap();
-        assert_eq!(devices[0].kind, Kind::Ppu);
-        assert_eq!(devices[1].visible, "PPU-def");
-        assert_eq!(
-            ppu_busy_devices("uuid, pid\nPPU-def, 1234\n"),
-            Some(HashSet::from(["PPU-def".into()]))
-        );
-        assert!(parse_ppu("index, uuid, name\n0, invalid, PPU\n").is_err());
-        assert_eq!(ppu_busy_devices("invalid query response"), None);
     }
 
     #[test]
