@@ -1,4 +1,5 @@
 mod ascend;
+mod hcu;
 
 use crate::model::{Device, Kind};
 use anyhow::{Context, Result, bail, ensure};
@@ -35,7 +36,8 @@ pub struct Inventory {
     mthreads: PathBuf,
     metax: PathBuf,
     ppu: PathBuf,
-    hcu: PathBuf,
+    hcu: Option<hcu::Smi>,
+    hcu_health: PathBuf,
 }
 
 impl Inventory {
@@ -48,7 +50,8 @@ impl Inventory {
             mthreads: locate("mthreads-gmi", &[]),
             metax: locate("mx-smi", &["/opt/mxdriver/bin/mx-smi"]),
             ppu: locate("ppu-smi", &["/usr/local/PPU_SDK/ppu-smi/bin/ppu-smi"]),
-            hcu: locate("hy-smi", &["/opt/dtk/.hyhal/bin/hy-smi"]),
+            hcu: None,
+            hcu_health: hcu::health_tool(),
         };
         for kind in Kind::PRIORITY {
             if backend == Backend::None
@@ -86,8 +89,12 @@ impl Inventory {
                     &["--query-ppu=index,uuid,name", "--format=csv"],
                 )
                 .and_then(|text| parse_ppu(&text)),
-                Kind::Hcu => output(&inventory.hcu, &["--json", "--showuniqueid"])
-                    .and_then(|text| parse_hcu(&text)),
+                Kind::Hcu => hcu::Smi::load().and_then(|driver| {
+                    let devices = driver.discover()?;
+                    inventory.hcu = Some(driver);
+                    eprintln!("HCU: using SMI API (hy-smi for health only)");
+                    Ok(devices)
+                }),
             };
             match found {
                 Ok(devices) => inventory.devices.extend(devices),
@@ -130,16 +137,17 @@ impl Inventory {
                 &["--query-compute-apps=uuid,pid", "--format=csv"],
             )
         });
-        let hcu_busy = self
-            .devices
-            .iter()
-            .any(|d| d.kind == Kind::Hcu)
-            .then(|| output(&self.hcu, &["--json", "--showpids"]));
+        let hcu_busy = self.devices.iter().any(|d| d.kind == Kind::Hcu).then(|| {
+            self.hcu
+                .as_ref()
+                .context("HCU SMI unavailable")?
+                .busy_devices()
+        });
         let hcu_health = self
             .devices
             .iter()
             .any(|d| d.kind == Kind::Hcu)
-            .then(|| output(&self.hcu, &["--healthcheck"]));
+            .then(|| output(&self.hcu_health, &["--healthcheck"]));
         let hcu_healthy = hcu_health
             .as_ref()
             .and_then(|result| result.as_ref().ok())
@@ -187,9 +195,7 @@ impl Inventory {
                     let process_idle = hcu_busy
                         .as_ref()
                         .and_then(|result| result.as_ref().ok())
-                        .and_then(|text| hcu_busy_devices(text))
-                        .and_then(|busy| busy.get(&device.id).copied())
-                        .map(|busy| !busy);
+                        .map(|busy| !busy.contains(&device.id));
                     if healthy == Some(true) {
                         process_idle
                     } else {
@@ -209,45 +215,6 @@ impl Inventory {
             self.status.insert(device.key(), status.into());
         }
     }
-}
-
-fn parse_hcu(text: &str) -> Result<Vec<Device>> {
-    let cards: serde_json::Value = serde_json::from_str(text).context("invalid hy-smi JSON")?;
-    let cards = cards.as_object().context("invalid hy-smi inventory")?;
-    let mut devices = Vec::new();
-    for (card, details) in cards {
-        let id = card
-            .strip_prefix("card")
-            .context("invalid hy-smi card key")?
-            .parse::<u32>()
-            .context("invalid hy-smi card index")?;
-        let visible = details
-            .get("Unique ID")
-            .and_then(serde_json::Value::as_str)
-            .context("missing HCU unique ID")?;
-        ensure!(!visible.is_empty(), "empty HCU unique ID");
-        devices.push(Device {
-            kind: Kind::Hcu,
-            id,
-            name: "HCU".into(),
-            visible: visible.into(),
-            npu: None,
-            chip: None,
-        });
-    }
-    devices.sort_by_key(|device| device.id);
-    validate(devices)
-}
-
-fn hcu_busy_devices(text: &str) -> Option<HashMap<u32, bool>> {
-    let cards: serde_json::Value = serde_json::from_str(text).ok()?;
-    let mut busy = HashMap::new();
-    for (card, details) in cards.as_object()? {
-        let id = card.strip_prefix("card")?.parse::<u32>().ok()?;
-        let details = details.as_object()?;
-        busy.insert(id, !details.is_empty());
-    }
-    (!busy.is_empty()).then_some(busy)
 }
 
 fn hcu_health_status(text: &str) -> Option<HashMap<u32, bool>> {
@@ -589,16 +556,7 @@ mod tests {
     }
 
     #[test]
-    fn hcu_parses_unique_ids_and_fail_closed_health_and_pid_data() {
-        let devices =
-            parse_hcu(r#"{"card1":{"Unique ID":"hcu-1"},"card0":{"Unique ID":"hcu-0"}}"#).unwrap();
-        assert_eq!(devices[0].id, 0);
-        assert_eq!(devices[0].visible, "hcu-0");
-        assert_eq!(
-            hcu_busy_devices(r#"{"card0":{},"card1":{"pid":"1234"}}"#),
-            Some(HashMap::from([(0, false), (1, true)]))
-        );
-        assert_eq!(hcu_busy_devices("invalid"), None);
+    fn hcu_health_fails_closed_on_missing_or_malformed_data() {
         let health = hcu_health_status(
             "System Management Interface\nHCU[0] : Bus Id : 0000:01:00.0 : Healthy\nHCU[1] : Bus Id : 0000:02:00.0 : Critical\n",
         );

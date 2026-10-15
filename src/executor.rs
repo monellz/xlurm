@@ -171,7 +171,7 @@ fn execute(paths: &Paths, job: &Job) -> Result<Outcome> {
         .env("MUSA_VISIBLE_DEVICES", visible_ids(job, Kind::Mthreads))
         .env("MTHREADS_VISIBLE_DEVICES", visible(job, Kind::Mthreads))
         .env("MACA_VISIBLE_DEVICES", visible_ids(job, Kind::Metax))
-        .env("HIP_VISIBLE_DEVICES", visible_ids(job, Kind::Hcu))
+        .env("HIP_VISIBLE_DEVICES", hcu_runtime_ids(job))
         .env("ROCR_VISIBLE_DEVICES", visible_ids(job, Kind::Hcu))
         .env_remove("ASCEND_DEVICE_ID")
         .stdin(Stdio::null())
@@ -289,9 +289,22 @@ fn visible_for_cuda(job: &Job) -> String {
     } else if job.devices.iter().any(|device| device.kind == Kind::Ppu) {
         visible(job, Kind::Ppu)
     } else if job.devices.iter().any(|device| device.kind == Kind::Hcu) {
-        visible_ids(job, Kind::Hcu)
+        hcu_runtime_ids(job)
     } else {
         visible(job, Kind::Nvidia)
+    }
+}
+
+// ROCR filters the physical devices first; HIP/CUDA address that reduced view.
+fn hcu_runtime_ids(job: &Job) -> String {
+    let count = job.devices.iter().filter(|d| d.kind == Kind::Hcu).count();
+    if count == 0 {
+        "-1".into()
+    } else {
+        (0..count)
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
     }
 }
 

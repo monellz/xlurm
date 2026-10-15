@@ -20,6 +20,7 @@ The main binaries are `xlurm`, `xrun`, `xbatch`, `xqueue`, `xcancel`, and
   result collection.
 - `src/device/mod.rs`: shared device inventory, backend selection, and occupancy checks.
 - `src/device/ascend.rs`: Ascend discovery and monitoring through DCMI v2.
+- `src/device/hcu.rs`: HCU discovery and process occupancy through SMI.
 - `src/auth.rs`: Unix peer credentials, account lookup, and authorization.
 - `src/storage.rs`: state paths, permissions, locking, and atomic JSON writes.
 - `tests/e2e.rs`: end-to-end behavior using simulated accelerator drivers.

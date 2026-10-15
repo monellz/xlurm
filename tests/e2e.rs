@@ -48,6 +48,14 @@ impl Harness {
             .env("XLURM_HOME", self.dir.path().join("state"))
             .env("XLURM_DCMI_LIBRARY", self.dir.path().join("libdcmi.so"))
             .env(
+                "XLURM_HCU_SMI_LIBRARY",
+                self.dir.path().join("libhcu_smi.so"),
+            )
+            .env(
+                "XLURM_HCU_HEALTH_TOOL",
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hy-smi"),
+            )
+            .env(
                 "PATH",
                 format!("{}:/usr/bin:/bin", self.dir.path().join("bin").display()),
             )
@@ -163,6 +171,21 @@ impl Harness {
             )
             .unwrap();
         }
+    }
+
+    fn hcu(&self, flags: &[&str]) {
+        let output = Command::new("cc")
+            .args(flags)
+            .args(["-shared", "-fPIC", "-Wall", "-Wextra", "-Werror", "-o"])
+            .arg(self.dir.path().join("libhcu_smi.so"))
+            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hcu_smi.c"))
+            .output()
+            .expect("HCU fixture requires cc");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     fn dcmi(&self) {
@@ -1014,17 +1037,13 @@ fn ppu_devices_are_discovered_exclusively_and_fail_closed() {
 fn hcu_devices_are_discovered_monitored_and_exposed_by_logical_id() {
     let mut h = Harness::new("hcu", 1);
     h.drivers();
-    symlink(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hy-smi"),
-        h.dir.path().join("bin/hy-smi"),
-    )
-    .unwrap();
+    h.hcu(&[]);
     fs::write(h.dir.path().join("hcu-busy"), "").unwrap();
     h.start();
 
     let devices: Vec<Value> = serde_json::from_slice(&h.run("xinfo", &["--json"]).stdout).unwrap();
     assert_eq!(devices.len(), 2);
-    assert_eq!(devices[0]["device"]["visible"], "hcu-unique-0");
+    assert_eq!(devices[0]["device"]["visible"], "0000000000000001");
     assert_eq!(devices[0]["status"], "idle");
     assert_eq!(devices[1]["status"], "busy");
 
@@ -1037,7 +1056,25 @@ fn hcu_devices_are_discovered_monitored_and_exposed_by_logical_id() {
     );
     assert_eq!(String::from_utf8(run.stdout).unwrap(), "0|0|0");
 
+    fs::remove_file(h.dir.path().join("hcu-busy")).unwrap();
+    let run = h.run("xrun", &["--device", "hcu", "-i", "1", "sh", "-c",
+        "printf '%s|%s|%s' \"$HIP_VISIBLE_DEVICES\" \"$ROCR_VISIBLE_DEVICES\" \"$CUDA_VISIBLE_DEVICES\""]);
+    assert_eq!(String::from_utf8(run.stdout).unwrap(), "0|1|0");
+    let run = h.run("xrun", &["--device", "hcu", "-i", "1,0", "sh", "-c",
+        "printf '%s|%s|%s' \"$HIP_VISIBLE_DEVICES\" \"$ROCR_VISIBLE_DEVICES\" \"$CUDA_VISIBLE_DEVICES\""]);
+    assert_eq!(String::from_utf8(run.stdout).unwrap(), "0,1|1,0|0,1");
+
     fs::write(h.dir.path().join("hcu-unhealthy"), "").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let devices: Vec<Value> =
+            serde_json::from_slice(&h.run("xinfo", &["--json"]).stdout).unwrap();
+        if devices[1]["status"] == "unhealthy" {
+            break;
+        }
+        assert!(Instant::now() < deadline, "unhealthy HCU not observed");
+        sleep(Duration::from_millis(50));
+    }
     let waiting = h.submit(&["--device", "hcu", "-i", "1", "--wrap", "true"]);
     assert_eq!(h.job(waiting)["state"], "PENDING");
 
@@ -1057,6 +1094,78 @@ fn hcu_devices_are_discovered_monitored_and_exposed_by_logical_id() {
         sleep(Duration::from_millis(50));
     }
     assert_eq!(h.job(waiting)["state"], "PENDING");
+}
+
+#[test]
+fn hcu_smi_failures_block_allocation_and_recover() {
+    let mut h = Harness::new("hcu", 1);
+    h.hcu(&[]);
+    fs::write(h.dir.path().join("hcu-busy"), "").unwrap();
+    h.start();
+    for marker in [
+        "hcu-probe-error",
+        "hcu-invalid-process-count",
+        "hcu-process-gpus-error",
+        "hcu-invalid-gpu-count",
+        "hcu-invalid-gpu-id",
+        "hcu-count-error",
+    ] {
+        fs::write(h.dir.path().join(marker), "").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            let devices: Vec<Value> =
+                serde_json::from_slice(&h.run("xinfo", &["--json"]).stdout).unwrap();
+            if devices.iter().all(|d| d["status"] == "unknown") {
+                break;
+            }
+            assert!(Instant::now() < deadline, "{marker}: {devices:?}");
+            sleep(Duration::from_millis(50));
+        }
+        let id = h.submit(&["--device", "hcu", "-i", "0", "--wrap", "true"]);
+        assert_eq!(h.job(id)["state"], "PENDING");
+        fs::remove_file(h.dir.path().join(marker)).unwrap();
+        h.wait_state(id, "COMPLETED");
+    }
+}
+
+#[test]
+fn hcu_smi_startup_errors_fail_closed() {
+    let h = Harness::new("hcu", 1);
+    h.hcu(&[]);
+    for marker in [
+        "hcu-init-error",
+        "hcu-count-error",
+        "hcu-discovery-error",
+        "hcu-duplicate-id",
+    ] {
+        fs::write(h.dir.path().join(marker), "").unwrap();
+        let output = h
+            .command("xlurm")
+            .args(["daemon", "--backend", "hcu"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{marker}");
+        assert!(!h.dir.path().join("state/xlurm.sock").exists());
+        fs::remove_file(h.dir.path().join(marker)).unwrap();
+    }
+    h.hcu(&["-DOMIT_PROCESS_API"]);
+    let output = h
+        .command("xlurm")
+        .args(["daemon", "--backend", "hcu"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("missing rsmi_compute_process_info_get")
+    );
+    fs::remove_file(h.dir.path().join("libhcu_smi.so")).unwrap();
+    let output = h
+        .command("xlurm")
+        .args(["daemon", "--backend", "hcu"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot load HCU SMI"));
 }
 
 #[test]

@@ -1,6 +1,6 @@
 # xlurm
 
-极简的 **Linux 单机、多用户** NVIDIA（`nv`）/ 摩尔线程（`mtt`）/ MetaX（`mx`）/ 华为 Ascend（`asc`）/ T-Head PPU（`ppu`）加速卡调度器。Rust 编写，直接用进程 Executor 执行任务，不依赖 tmux。一个共享调度器统一分配整机设备，每个任务以提交用户自己的身份执行。
+极简的 **Linux 单机、多用户** NVIDIA（`nv`）/ 摩尔线程（`mtt`）/ MetaX（`mx`）/ 华为 Ascend（`asc`）/ T-Head PPU（`ppu`）/ 海光 HCU（`hcu`）加速卡调度器。Rust 编写，直接用进程 Executor 执行任务，不依赖 tmux。一个共享调度器统一分配整机设备，每个任务以提交用户自己的身份执行。
 
 在仓库目录中，一条命令即可安装全部命令：
 
@@ -101,6 +101,8 @@ sudo xlurm clean                             # 所有任务结束后删除日志
 
 Ascend 自动使用 DCMI v2，不使用 v1 接口。Ascend 后端要求驱动库、v2 符号可用且初始化成功，失败会报告设备发现错误。库依次从 `/usr/local/dcmi/libdcmi.so`、`/usr/local/Ascend/driver/lib64/driver/libdcmi.so`、动态加载器的 `libdcmi.so` 搜索路径加载。管理员可在守护进程环境中设置 `XLURM_DCMI_LIBRARY=/absolute/path/libdcmi.so` 使用其他可信驱动库；显式路径会禁用上述搜索。配置在守护进程启动时生效（包括 `restart`），不读取任务提交者的环境。
 
+HCU 库依次从 `/opt/hyhal/lib/librocm_smi64.so`、`/opt/dtk/.hyhal/rocm_smi/lib/librocm_smi64.so`、动态加载器的 `librocm_smi64.so` 搜索路径加载。管理员可在守护进程环境设置 `XLURM_HCU_SMI_LIBRARY=/absolute/path/librocm_smi64.so` 和 `XLURM_HCU_HEALTH_TOOL=/absolute/path/hy-smi` 指定可信库与健康检查程序。显式路径禁用对应搜索，仅在守护进程启动时生效，不读取任务提交者的环境。缺少符号或初始化失败会报告 HCU 发现错误。
+
 默认共享状态目录为 `/var/lib/xlurm`。所有用户自动连接这里的 Unix socket，无需用户各自启动服务。可以通过 `XLURM_HOME` 指定其他由管理员持有的短绝对路径，所有客户端和调度器必须使用同一路径。没有配置文件，也没有网络监听端口。
 
 状态目录为 root 所有、0755，socket 为 0666，供本机用户连接；`jobs/` 为 0700，状态、环境、日志为 0600。**所有用户都能查看全主机的队列摘要，但不能修改队列文件或直接读取其他人的日志**。所有日志访问都经过服务端鉴权。
@@ -138,8 +140,9 @@ xrun / xbatch / xqueue / xcancel / xinfo
 - 摩尔线程用 `mthreads-gmi --list-gpus` 发现设备并保存 UUID；通过 `mthreads-gmi` 进程表识别外部占用。任务设置 `MTHREADS_VISIBLE_DEVICES` UUID 和 `MUSA_VISIBLE_DEVICES` 设备序号，显示简写为 `mtt`。
 - MetaX 用 `mx-smi -L` 发现设备并保存 UUID，通过 `mx-smi --show-all-process` 识别外部占用。任务设置设备序号到 `CUDA_VISIBLE_DEVICES` 和 `MACA_VISIBLE_DEVICES`；显示简写为 `mx`。
 - T-Head PPU 用 `ppu-smi --query-ppu` 按 UUID 发现设备，并通过 `--query-compute-apps` 检查外部计算进程。任务将已分配 UUID 写入 `CUDA_VISIBLE_DEVICES`；显示简写为 `ppu`。
-- Hygon HCU 用 `hy-smi` 按 Unique ID 发现设备，通过 `--showpids` 和 `--healthcheck` 检查 KFD 进程占用与健康状态。不健康设备不参与分配，探测失败会暂停分配。任务按逻辑编号设置 `HIP_VISIBLE_DEVICES`、`ROCR_VISIBLE_DEVICES` 和 `CUDA_VISIBLE_DEVICES`；显示简写为 `hcu`。
-- 每两秒检查驱动报告的外部计算进程；有占用的设备暂不分配，查询失败显示 `unknown` 并暂停分配。单次驱动**命令**调用最多等待 3 秒；DCMI 接口在调度器中同步调用，依赖驱动自身的返回时间，没有应用层超时。
+- Hygon HCU 通过驱动的 `librocm_smi64.so` API 按 Unique ID 发现设备并查询进程占用，不再依赖 JSON 输出和 PATH。综合健康检查仍使用 `hy-smi --healthcheck`，优先选择 `/opt/dtk/.hyhal/bin/hy-smi`，再查 PATH。不健康设备不参与分配，探测失败会暂停分配。`ROCR_VISIBLE_DEVICES` 选择分配的设备索引，`HIP_VISIBLE_DEVICES` 和 `CUDA_VISIBLE_DEVICES` 使用过滤后的 `0..N-1` 编号。这些环境变量控制运行时可见性，不构成访问权限隔离。依赖进程查询检测外来负载前，需在实际负载下验证驱动的上报能力；成功返回空列表不能证明不存在驱动漏报的进程。显示简写为 `hcu`。
+
+- 每两秒检查驱动报告的外部计算进程；有占用的设备暂不分配，查询失败显示 `unknown` 并暂停分配。单次驱动**命令**调用最多等待 3 秒；DCMI 和 HCU SMI 接口在调度器中同步调用，依赖驱动自身的返回时间，没有应用层超时。
 - 客户端连接会立即唤醒空闲的调度器；队列响应使用缓冲写入，避免历史任务较多时产生大量系统调用。调度器保持单线程。
 - worker 持有继承的文件锁，调度器重启后通过锁接管任务；不靠裸 PID 判断任务是否存活。退出结果通过原子文件写入。
 - 取消先向进程组发 SIGTERM，一秒后仍未退出则发 SIGKILL。任务主进程结束时清理同组后台子进程，并回收孤儿进程，然后释放设备。
