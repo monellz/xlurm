@@ -47,6 +47,7 @@ impl Harness {
             .current_dir(self.dir.path())
             .env("XLURM_HOME", self.dir.path().join("state"))
             .env("XLURM_DCMI_LIBRARY", self.dir.path().join("libdcmi.so"))
+            .env("XLURM_MXSML_LIBRARY", self.dir.path().join("libmxsml.so"))
             .env(
                 "XLURM_HCU_SMI_LIBRARY",
                 self.dir.path().join("libhcu_smi.so"),
@@ -162,15 +163,26 @@ impl Harness {
         // fork can inherit the writer before CLOEXEC takes effect, making a
         // just-written script fail with ETXTBSY even after fs::write returns.
         // Links also work when the test's temporary directory is mounted noexec.
-        for name in ["nvidia-smi", "mx-smi"] {
-            symlink(
-                Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("tests/fixtures")
-                    .join(name),
-                self.dir.path().join("bin").join(name),
-            )
-            .unwrap();
-        }
+        symlink(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/nvidia-smi"),
+            self.dir.path().join("bin/nvidia-smi"),
+        )
+        .unwrap();
+    }
+
+    fn mxsml(&self, flags: &[&str]) {
+        let output = Command::new("cc")
+            .args(flags)
+            .args(["-shared", "-fPIC", "-Wall", "-Wextra", "-Werror", "-o"])
+            .arg(self.dir.path().join("libmxsml.so"))
+            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mxsml.c"))
+            .output()
+            .expect("MXSML fixture requires cc");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     fn hcu(&self, flags: &[&str]) {
@@ -975,6 +987,155 @@ fn background_start_and_restart_apply_temporary_device_exclusions() {
     assert_eq!(String::from_utf8(output.stdout).unwrap(), "2");
     h.run("xlurm", &["restart", "--backend", "ascend"]);
     h.run("xrun", &["-i", "2,3", "true"]);
+}
+
+#[test]
+fn metax_mxsml_discovers_and_monitors_without_cli() {
+    let mut h = Harness::new("metax", 2);
+    h.mxsml(&[]);
+    fs::write(h.dir.path().join("mx-busy"), "").unwrap();
+    h.start();
+    let devices: Vec<Value> = serde_json::from_slice(&h.run("xinfo", &["--json"]).stdout).unwrap();
+    assert_eq!(devices.len(), 2);
+    assert_eq!(devices[0]["device"]["kind"], "metax");
+    assert_eq!(devices[0]["device"]["visible"], "GPU-metax-0");
+    assert_eq!(devices[0]["device"]["name"], "MXC550");
+    assert_eq!(devices[0]["status"], "idle");
+    assert_eq!(devices[1]["status"], "busy");
+    let pending = h.submit(&["--device", "metax", "-i", "1", "--wrap", "true"]);
+    assert_eq!(h.job(pending)["state"], "PENDING");
+    fs::remove_file(h.dir.path().join("mx-busy")).unwrap();
+    h.wait_state(pending, "COMPLETED");
+    for (ids, expected) in [("1", "1|1"), ("1,0", "1,0|1,0")] {
+        let run = h.run(
+            "xrun",
+            &[
+                "--device",
+                "metax",
+                "-i",
+                ids,
+                "sh",
+                "-c",
+                "printf '%s|%s' \"$MACA_VISIBLE_DEVICES\" \"$CUDA_VISIBLE_DEVICES\"",
+            ],
+        );
+        assert_eq!(String::from_utf8(run.stdout).unwrap(), expected);
+    }
+    assert!(!h.dir.path().join("bin/mx-smi").exists());
+}
+
+#[test]
+fn metax_mxsml_failures_are_per_device_and_recover() {
+    let mut h = Harness::new("metax", 2);
+    h.mxsml(&[]);
+    h.start();
+    for marker in [
+        "mx-handle-error",
+        "mx-null-handle",
+        "mx-uuid-error",
+        "mx-uuid-changed",
+        "mx-availability-error",
+        "mx-missing-availability",
+        "mx-probe-error",
+        "mx-insufficient-capacity",
+        "mx-invalid-process-count",
+        "mx-invalid-pid",
+        "mx-unhealthy",
+    ] {
+        if marker == "mx-invalid-pid" {
+            fs::write(h.dir.path().join("mx-busy"), "").unwrap();
+        }
+        fs::write(h.dir.path().join(marker), "").unwrap();
+        let expected = if marker == "mx-unhealthy" {
+            "unhealthy"
+        } else {
+            "unknown"
+        };
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            let devices: Vec<Value> =
+                serde_json::from_slice(&h.run("xinfo", &["--json"]).stdout).unwrap();
+            if devices[1]["status"] == expected {
+                assert_eq!(devices[0]["status"], "idle");
+                break;
+            }
+            assert!(Instant::now() < deadline, "{marker}: {devices:?}");
+            sleep(Duration::from_millis(30));
+        }
+        let pending = h.submit(&["--device", "metax", "-i", "1", "--wrap", "true"]);
+        assert_eq!(h.job(pending)["state"], "PENDING");
+        h.wait_state(
+            h.submit(&["--device", "metax", "-i", "0", "--wrap", "true"]),
+            "COMPLETED",
+        );
+        fs::remove_file(h.dir.path().join(marker)).unwrap();
+        if marker == "mx-invalid-pid" {
+            fs::remove_file(h.dir.path().join("mx-busy")).unwrap();
+        }
+        h.wait_state(pending, "COMPLETED");
+    }
+}
+
+#[test]
+fn metax_mxsml_unhealthy_devices_skip_process_queries() {
+    let mut h = Harness::new("metax", 1);
+    h.mxsml(&[]);
+    fs::write(h.dir.path().join("mx-unhealthy"), "").unwrap();
+    h.start();
+    let devices: Vec<Value> = serde_json::from_slice(&h.run("xinfo", &["--json"]).stdout).unwrap();
+    assert_eq!(devices[1]["status"], "unhealthy");
+    let queries = fs::read_to_string(h.dir.path().join("mxsml-queries")).unwrap();
+    assert!(queries.contains("availability 1"));
+    assert!(!queries.contains("process 1"));
+}
+
+#[test]
+fn metax_mxsml_startup_errors_fail_closed() {
+    let h = Harness::new("metax", 1);
+    h.mxsml(&[]);
+    for marker in [
+        "mx-init-error",
+        "mx-count-error",
+        "mx-invalid-count",
+        "mx-zero-count",
+        "mx-handle-error",
+        "mx-null-handle",
+        "mx-uuid-error",
+        "mx-invalid-uuid",
+        "mx-duplicate-id",
+        "mx-name-error",
+        "mx-unterminated-name",
+        "mx-invalid-utf8",
+    ] {
+        fs::write(h.dir.path().join(marker), "").unwrap();
+        let output = h
+            .command("xlurm")
+            .args(["daemon", "--backend", "metax"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{marker}");
+        assert!(!h.dir.path().join("state/xlurm.sock").exists());
+        fs::remove_file(h.dir.path().join(marker)).unwrap();
+    }
+    h.mxsml(&["-DOMIT_PROCESS_API"]);
+    let output = h
+        .command("xlurm")
+        .args(["daemon", "--backend", "metax"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("missing mxSmlExDeviceGetComputeRunningProcesses")
+    );
+    fs::remove_file(h.dir.path().join("libmxsml.so")).unwrap();
+    let output = h
+        .command("xlurm")
+        .args(["daemon", "--backend", "metax"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot load MetaX MXSML"));
 }
 
 #[test]

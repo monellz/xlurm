@@ -2,8 +2,8 @@
 
 ## Project Overview
 
-`xlurm` is a small Linux-only, multi-user scheduler for NVIDIA GPUs and Ascend
-NPUs. It is written in Rust and communicates over a local Unix socket. Keep the
+`xlurm` is a small Linux-only, multi-user scheduler for NVIDIA, Moore Threads, MetaX, Ascend, PPU, and HCU
+accelerators. It is written in Rust and communicates over a local Unix socket. Keep the
 implementation deliberately small: there is no async runtime, database, HTTP
 service, web UI, or tmux integration.
 
@@ -21,6 +21,7 @@ The main binaries are `xlurm`, `xrun`, `xbatch`, `xqueue`, `xcancel`, and
 - `src/device/mod.rs`: shared device inventory, backend selection, and occupancy checks.
 - `src/device/ascend.rs`: Ascend discovery and monitoring through DCMI v2.
 - `src/device/hcu.rs`: HCU discovery and process occupancy through SMI.
+- `src/device/metax.rs`: MetaX discovery, availability, and process occupancy through MXSML.
 - `src/auth.rs`: Unix peer credentials, account lookup, and authorization.
 - `src/storage.rs`: state paths, permissions, locking, and atomic JSON writes.
 - `tests/e2e.rs`: end-to-end behavior using simulated accelerator drivers.
@@ -37,8 +38,8 @@ cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 ```
 
-Ordinary tests do not require root or accelerator hardware. The executables in
-`tests/fixtures/` simulate NVIDIA and Ascend management tools.
+Ordinary tests do not require root or accelerator hardware. The fixtures in
+`tests/fixtures/` simulate driver tools and DCMI, MXSML, and HCU SMI libraries.
 
 For changes to authentication, privilege dropping, file ownership, socket
 permissions, or cross-user access, also run the following when root access and

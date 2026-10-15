@@ -1,5 +1,6 @@
 mod ascend;
 mod hcu;
+mod metax;
 
 use crate::model::{Device, Kind};
 use anyhow::{Context, Result, bail, ensure};
@@ -34,7 +35,7 @@ pub struct Inventory {
     nvidia: PathBuf,
     ascend: Option<ascend::Dcmi>,
     mthreads: PathBuf,
-    metax: PathBuf,
+    metax: Option<metax::Mxsml>,
     ppu: PathBuf,
     hcu: Option<hcu::Smi>,
     hcu_health: PathBuf,
@@ -48,7 +49,7 @@ impl Inventory {
             nvidia: locate("nvidia-smi", &[]),
             ascend: None,
             mthreads: locate("mthreads-gmi", &[]),
-            metax: locate("mx-smi", &["/opt/mxdriver/bin/mx-smi"]),
+            metax: None,
             ppu: locate("ppu-smi", &["/usr/local/PPU_SDK/ppu-smi/bin/ppu-smi"]),
             hcu: None,
             hcu_health: hcu::health_tool(),
@@ -81,9 +82,12 @@ impl Inventory {
                 }),
                 Kind::Mthreads => output(&inventory.mthreads, &["--list-gpus"])
                     .and_then(|text| parse_mthreads(&text)),
-                Kind::Metax => {
-                    output(&inventory.metax, &["-L"]).and_then(|text| parse_metax(&text))
-                }
+                Kind::Metax => metax::Mxsml::load().and_then(|driver| {
+                    let devices = driver.discover()?;
+                    inventory.metax = Some(driver);
+                    eprintln!("MetaX: using MXSML API");
+                    Ok(devices)
+                }),
                 Kind::Ppu => output(
                     &inventory.ppu,
                     &["--query-ppu=index,uuid,name", "--format=csv"],
@@ -126,11 +130,6 @@ impl Inventory {
             .iter()
             .any(|d| d.kind == Kind::Mthreads)
             .then(|| output(&self.mthreads, &[]));
-        let metax_busy = self
-            .devices
-            .iter()
-            .any(|d| d.kind == Kind::Metax)
-            .then(|| output(&self.metax, &["--show-all-process"]));
         let ppu_busy = self.devices.iter().any(|d| d.kind == Kind::Ppu).then(|| {
             output(
                 &self.ppu,
@@ -176,11 +175,14 @@ impl Inventory {
                     .and_then(|result| result.as_ref().ok())
                     .and_then(|text| mthreads_busy_devices(text))
                     .map(|busy| !busy.contains(&device.id)),
-                Kind::Metax => metax_busy
-                    .as_ref()
-                    .and_then(|result| result.as_ref().ok())
-                    .and_then(|text| metax_busy_devices(text))
-                    .map(|busy| !busy.contains(&device.id)),
+                Kind::Metax => {
+                    let status = self
+                        .metax
+                        .as_ref()
+                        .map_or("unknown", |driver| driver.status(device));
+                    self.status.insert(device.key(), status.into());
+                    continue;
+                }
                 Kind::Ppu => ppu_busy
                     .as_ref()
                     .and_then(|result| result.as_ref().ok())
@@ -394,43 +396,6 @@ fn mthreads_busy_devices(text: &str) -> Option<HashSet<u32>> {
     saw_process_header.then_some(busy)
 }
 
-fn parse_metax(text: &str) -> Result<Vec<Device>> {
-    let mut devices = Vec::new();
-    for line in text
-        .lines()
-        .filter(|line| line.trim_start().starts_with("GPU#"))
-    {
-        let line = line.trim();
-        let (id, rest) = line
-            .strip_prefix("GPU#")
-            .context("invalid mx-smi device ID")?
-            .split_once(char::is_whitespace)
-            .context("invalid mx-smi device row")?;
-        let id = id.parse::<u32>().context("invalid mx-smi device ID")?;
-        ensure!(
-            !rest.contains("Not Available"),
-            "MetaX GPU {id} is not available to this process"
-        );
-        let (name, uuid) = rest
-            .split_once("(UUID:")
-            .context("missing MetaX GPU UUID")?;
-        let uuid = uuid.trim().trim_end_matches(')').trim();
-        ensure!(
-            uuid.starts_with("GPU-") && !uuid.contains(char::is_whitespace),
-            "invalid MetaX GPU UUID"
-        );
-        devices.push(Device {
-            kind: Kind::Metax,
-            id,
-            visible: uuid.into(),
-            name: name.split_whitespace().next().unwrap_or("MetaX").into(),
-            npu: None,
-            chip: None,
-        });
-    }
-    validate(devices)
-}
-
 fn parse_ppu(text: &str) -> Result<Vec<Device>> {
     let mut lines = text.lines();
     let header = lines.next().context("missing PPU-SMI CSV header")?;
@@ -485,38 +450,6 @@ fn ppu_uuid(value: &str) -> bool {
     value.starts_with("GPU-") || value.starts_with("PPU-")
 }
 
-fn metax_busy_devices(text: &str) -> Option<HashSet<u32>> {
-    if text.lines().any(|line| line.contains("no process found")) {
-        return Some(HashSet::new());
-    }
-    let mut in_process_table = false;
-    let mut saw_process_header = false;
-    let mut busy = HashSet::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.starts_with("| Process:") {
-            in_process_table = true;
-            continue;
-        }
-        if !in_process_table || line.is_empty() || line.starts_with('|') && line.contains("GPU ") {
-            continue;
-        }
-        let fields = line
-            .trim_matches('|')
-            .split_whitespace()
-            .collect::<Vec<_>>();
-        if fields.len() >= 2
-            && let (Ok(id), Ok(pid)) = (fields[0].parse::<u32>(), fields[1].parse::<u32>())
-        {
-            saw_process_header = true;
-            if pid > 0 {
-                busy.insert(id);
-            }
-        }
-    }
-    saw_process_header.then_some(busy)
-}
-
 fn validate(devices: Vec<Device>) -> Result<Vec<Device>> {
     if devices.is_empty() {
         bail!("no compute devices discovered");
@@ -562,33 +495,5 @@ mod tests {
         );
         assert_eq!(health, Some(HashMap::from([(0, true), (1, false)])));
         assert_eq!(hcu_health_status("probe failed"), None);
-    }
-
-    #[test]
-    fn metax_uses_uuid_for_identity_and_fails_on_partial_inventory() {
-        let devices = parse_metax(
-            "mx-smi  version: 2.3.1\nGPU#0    MXC550      0000:2b:00.0   Available (UUID: GPU-abc-123)\n",
-        )
-        .unwrap();
-        assert_eq!(devices[0].kind, Kind::Metax);
-        assert_eq!(devices[0].visible, "GPU-abc-123");
-        assert_eq!(devices[0].name, "MXC550");
-        assert!(parse_metax(
-            "GPU#0 MXC550 bus Available (UUID: GPU-abc)\nGPU#1 MXC550 bus Not Available(MetaX Sysfs File Unaccessible)\n"
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn metax_process_table_fails_closed_without_known_empty_or_rows() {
-        assert_eq!(
-            metax_busy_devices("| Process: |\n| no process found |\n"),
-            Some(HashSet::new())
-        );
-        assert_eq!(
-            metax_busy_devices("| Process: |\n| GPU PID Process Name |\n| 3 1234 train 100MiB |\n"),
-            Some(HashSet::from([3]))
-        );
-        assert_eq!(metax_busy_devices("| Process: |\n| unavailable |\n"), None);
     }
 }
