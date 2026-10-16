@@ -112,6 +112,14 @@ PPU library search checks `/usr/local/PPU_SDK/lib/libhgml.so`, `/usr/local/PPU_S
 
 HCU library search checks `/opt/hyhal/lib/librocm_smi64.so`, `/opt/dtk/.hyhal/rocm_smi/lib/librocm_smi64.so`, then the dynamic loader's `librocm_smi64.so`. Administrators may override the library with `XLURM_HCU_SMI_LIBRARY=/absolute/path/librocm_smi64.so` and the health executable with `XLURM_HCU_HEALTH_TOOL=/absolute/path/hy-smi` in the daemon environment. Explicit overrides disable the respective search and apply at daemon startup, never from submitted job environments. Missing symbols or initialization failures stop HCU discovery.
 
+For DTK installations that provide `/opt/dtk/env.sh`, source it in the administrator's Bash shell before starting the HCU daemon so it inherits the driver library paths. The preferred DTK `hy-smi` health executable may otherwise fail with `librocm_smi64.so.2: cannot open shared object file`, leaving devices `unknown` and unavailable for allocation. `sudo` or a service manager may discard these environment settings; initialize DTK in the shell or service that actually launches the daemon. For an existing daemon, apply the environment when restarting after running jobs finish.
+
+```bash
+# Run in the administrator/root Bash shell inside the HCU environment.
+source /opt/dtk/env.sh
+xlurm start --backend hcu
+```
+
 The default shared state directory is `/var/lib/xlurm`. All users automatically connect to its Unix socket without starting their own service. Set `XLURM_HOME` to another short absolute path owned by the administrator; all clients and the scheduler must use the same path. There is no configuration file and no network listening port.
 
 The state directory is root-owned with mode 0755, and the socket has mode 0666 so local users can connect. `jobs/` has mode 0700, while state, environment, and logs have mode 0600. **Users can connect to the socket but cannot modify queue files or directly read another user's logs.** All log access is authorized by the server.

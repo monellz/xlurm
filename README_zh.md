@@ -110,6 +110,14 @@ PPU 库依次从 `/usr/local/PPU_SDK/lib/libhgml.so`、`/usr/local/PPU_SDK/targe
 
 HCU 库依次从 `/opt/hyhal/lib/librocm_smi64.so`、`/opt/dtk/.hyhal/rocm_smi/lib/librocm_smi64.so`、动态加载器的 `librocm_smi64.so` 搜索路径加载。管理员可在守护进程环境设置 `XLURM_HCU_SMI_LIBRARY=/absolute/path/librocm_smi64.so` 和 `XLURM_HCU_HEALTH_TOOL=/absolute/path/hy-smi` 指定可信库与健康检查程序。显式路径禁用对应搜索，仅在守护进程启动时生效，不读取任务提交者的环境。缺少符号或初始化失败会报告 HCU 发现错误。
 
+对于提供 `/opt/dtk/env.sh` 的 DTK 安装，启动 HCU 守护进程前，应在管理员的 Bash shell 中加载该脚本，让守护进程继承驱动库搜索路径。否则，优先选择的 DTK `hy-smi` 健康检查程序可能报 `librocm_smi64.so.2: cannot open shared object file`，使设备保持 `unknown`、无法分配。`sudo` 或服务管理器可能丢弃这些环境变量；应在实际启动守护进程的 shell 或服务中初始化 DTK。已有守护进程需等运行中的任务结束后，在该环境下重启以应用设置。
+
+```bash
+# 在 HCU 环境内的管理员/root Bash shell 中执行。
+source /opt/dtk/env.sh
+xlurm start --backend hcu
+```
+
 默认共享状态目录为 `/var/lib/xlurm`。所有用户自动连接这里的 Unix socket，无需用户各自启动服务。可以通过 `XLURM_HOME` 指定其他由管理员持有的短绝对路径，所有客户端和调度器必须使用同一路径。没有配置文件，也没有网络监听端口。
 
 状态目录为 root 所有、0755，socket 为 0666，供本机用户连接；`jobs/` 为 0700，状态、环境、日志为 0600。**所有用户都能查看全主机的队列摘要，但不能修改队列文件或直接读取其他人的日志**。所有日志访问都经过服务端鉴权。
