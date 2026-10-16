@@ -1,6 +1,7 @@
 mod ascend;
 mod hcu;
 mod metax;
+mod mthreads;
 mod ppu;
 
 use crate::model::{Device, Kind};
@@ -35,7 +36,7 @@ pub struct Inventory {
     pub status: HashMap<String, String>,
     nvidia: PathBuf,
     ascend: Option<ascend::Dcmi>,
-    mthreads: PathBuf,
+    mthreads: Option<mthreads::Mtml>,
     metax: Option<metax::Mxsml>,
     ppu: Option<ppu::Hgml>,
     hcu: Option<hcu::Smi>,
@@ -49,7 +50,7 @@ impl Inventory {
             status: HashMap::new(),
             nvidia: locate("nvidia-smi", &[]),
             ascend: None,
-            mthreads: locate("mthreads-gmi", &[]),
+            mthreads: None,
             metax: None,
             ppu: None,
             hcu: None,
@@ -78,11 +79,15 @@ impl Inventory {
                 Kind::Ascend => ascend::Dcmi::load().and_then(|driver| {
                     let devices = driver.discover()?;
                     inventory.ascend = Some(driver);
-                    eprintln!("Ascend: using DCMI v2 API");
+                    eprintln!("Ascend: using DCMI API");
                     Ok(devices)
                 }),
-                Kind::Mthreads => output(&inventory.mthreads, &["--list-gpus"])
-                    .and_then(|text| parse_mthreads(&text)),
+                Kind::Mthreads => mthreads::Mtml::load().and_then(|driver| {
+                    let devices = driver.discover()?;
+                    inventory.mthreads = Some(driver);
+                    eprintln!("MThreads: using MTML API");
+                    Ok(devices)
+                }),
                 Kind::Metax => metax::Mxsml::load().and_then(|driver| {
                     let devices = driver.discover()?;
                     inventory.metax = Some(driver);
@@ -127,11 +132,6 @@ impl Inventory {
                     ],
                 )
             });
-        let mthreads_busy = self
-            .devices
-            .iter()
-            .any(|d| d.kind == Kind::Mthreads)
-            .then(|| output(&self.mthreads, &[]));
         let hcu_busy = self.devices.iter().any(|d| d.kind == Kind::Hcu).then(|| {
             self.hcu
                 .as_ref()
@@ -166,11 +166,14 @@ impl Inventory {
                     self.status.insert(device.key(), status.into());
                     continue;
                 }
-                Kind::Mthreads => mthreads_busy
-                    .as_ref()
-                    .and_then(|result| result.as_ref().ok())
-                    .and_then(|text| mthreads_busy_devices(text))
-                    .map(|busy| !busy.contains(&device.id)),
+                Kind::Mthreads => {
+                    let status = self
+                        .mthreads
+                        .as_ref()
+                        .map_or("unknown", |driver| driver.status(device));
+                    self.status.insert(device.key(), status.into());
+                    continue;
+                }
                 Kind::Metax => {
                     let status = self
                         .metax
@@ -325,74 +328,6 @@ fn parse_nvidia(text: &str) -> Result<Vec<Device>> {
         });
     }
     validate(devices)
-}
-
-fn parse_mthreads(text: &str) -> Result<Vec<Device>> {
-    let mut devices = Vec::new();
-    for line in text.lines().filter(|line| line.contains("UUID")) {
-        let (left, right) = line
-            .split_once(":")
-            .context("invalid mthreads-gmi device row")?;
-        let id = left
-            .trim()
-            .strip_prefix("GPU ")
-            .context("invalid mthreads-gmi device ID")?
-            .parse::<u32>()?;
-        let name = right
-            .split("(UUID")
-            .next()
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        let uuid = right
-            .split_once("UUID :")
-            .context("missing mthreads GPU UUID")?
-            .1
-            .trim()
-            .trim_end_matches(')')
-            .trim();
-        ensure!(!uuid.is_empty(), "missing mthreads GPU UUID");
-        devices.push(Device {
-            kind: Kind::Mthreads,
-            id,
-            visible: uuid.into(),
-            name,
-            npu: None,
-            chip: None,
-        });
-    }
-    validate(devices)
-}
-
-fn mthreads_busy_devices(text: &str) -> Option<HashSet<u32>> {
-    let mut in_process_table = false;
-    let mut saw_process_header = false;
-    let mut busy = HashSet::new();
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed == "Processes:" {
-            in_process_table = true;
-            saw_process_header = true;
-            continue;
-        }
-        if !in_process_table
-            || trimmed.is_empty()
-            || trimmed.starts_with('+')
-            || trimmed.starts_with("ID ")
-            || trimmed == "Usage"
-            || trimmed.eq_ignore_ascii_case("No running processes found")
-            || trimmed.chars().all(|ch| ch == '-')
-        {
-            continue;
-        }
-        let mut fields = trimmed.split_whitespace();
-        let id = fields.next()?.parse::<u32>().ok()?;
-        let pid = fields.next()?.parse::<u32>().ok()?;
-        if pid > 0 {
-            busy.insert(id);
-        }
-    }
-    saw_process_header.then_some(busy)
 }
 
 fn validate(devices: Vec<Device>) -> Result<Vec<Device>> {

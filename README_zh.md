@@ -102,7 +102,7 @@ sudo xlurm clean                             # 所有任务结束后删除日志
 
 调度器运行期间，管理员可用 `xlurm exclude ID[,ID...]` 追加排除卡，用 `xlurm include ID[,ID...]` 恢复指定卡。这两个命令无需重启，对后续分配生效，不中断已有运行任务；卡恢复且空闲后，相关排队任务会继续执行。重复排除或恢复同一张卡不会报错，整个编号列表校验通过后才会修改设置。动态修改同样是临时的，调度器退出后清除。普通用户无权修改排除列表；非 root 测试调度器允许其自身账户操作。使用这些命令需要更新调度器，旧版调度器会拒绝新请求且不修改状态。
 
-Ascend 自动使用 DCMI v2，不使用 v1 接口。Ascend 后端要求驱动库、v2 符号可用且初始化成功，失败会报告设备发现错误。库依次从 `/usr/local/dcmi/libdcmi.so`、`/usr/local/Ascend/driver/lib64/driver/libdcmi.so`、动态加载器的 `libdcmi.so` 搜索路径加载。管理员可在守护进程环境中设置 `XLURM_DCMI_LIBRARY=/absolute/path/libdcmi.so` 使用其他可信驱动库；显式路径会禁用上述搜索。配置在守护进程启动时生效（包括 `restart`），不读取任务提交者的环境。
+Ascend 优先使用 DCMI v2 API；如果驱动库没有导出 `dcmiv2_*` 符号，xlurm 会使用 `dcmi_interface_api.h` 中兼容的 `dcmi_*` API，绝不回退到 `npu-smi`。Ascend 后端要求驱动库、v2 符号可用且初始化成功，失败会报告设备发现错误。库依次从 `/usr/local/dcmi/libdcmi.so`、`/usr/local/Ascend/driver/lib64/driver/libdcmi.so`、动态加载器的 `libdcmi.so` 搜索路径加载。管理员可在守护进程环境中设置 `XLURM_DCMI_LIBRARY=/absolute/path/libdcmi.so` 使用其他可信驱动库；显式路径会禁用上述搜索。配置在守护进程启动时生效（包括 `restart`），不读取任务提交者的环境。
 
 MetaX 库依次从 `/opt/mxdriver/lib/libmxsml.so`、`/opt/maca/lib/libmxsml.so`、`/opt/mxn100/lib/libmxsml.so`、动态加载器的 `libmxsml.so` 搜索路径加载。管理员可在守护进程环境设置 `XLURM_MXSML_LIBRARY=/absolute/path/libmxsml.so` 选择其他可信驱动库并禁用回退搜索。库须提供 MXSML 扩展接口及 `mxSmlGetDeviceUnavailableReason`。缺少库或符号、初始化或设备发现失败时，自动模式跳过 MetaX，显式指定 `--backend metax` 时阻止启动。任务提交者的环境不能改变该配置。
 
@@ -152,7 +152,7 @@ xrun / xbatch / xqueue / xcancel / xinfo
 - 每个设备槽独占分配，单个任务只使用一个厂商的设备池。自动选择优先尝试 NVIDIA、Ascend、摩尔线程、MetaX、PPU，再尝试 HCU。多芯片 Ascend 卡按独立计算芯片分配。
 - NVIDIA 用 `nvidia-smi` 发现与监测，按 GPU UUID 设置 `CUDA_VISIBLE_DEVICES`，避免 CUDA 与管理工具索引顺序不同。
 - Ascend 默认只加载一次 `libdcmi.so`，直接通过 DCMI v2 查询逻辑设备 ID、各芯片健康状态及进程占用，保持单线程调度。按逻辑 ID 设置 `ASCEND_RT_VISIBLE_DEVICES`，DCMI v2 直接按逻辑 ID 查询，无需物理卡号/芯片号映射。Ascend 后端要求驱动库、v2 符号可用且初始化成功，失败会报告设备发现错误。自动发现后端时，发现错误会跳过 Ascend；显式指定 `--backend ascend` 时，发现错误会阻止启动。监测失败或设备不存在时显示 `unknown` 并暂停分配，健康状态非零时显示 `unhealthy` 并排除该芯片。
-- 摩尔线程用 `mthreads-gmi --list-gpus` 发现设备并保存 UUID；通过 `mthreads-gmi` 进程表识别外部占用。任务设置 `MTHREADS_VISIBLE_DEVICES` UUID 和 `MUSA_VISIBLE_DEVICES` 设备序号，显示简写为 `mtt`。
+- 摩尔线程通过只读 MTML API（`libmtml.so`）发现设备并保存 UUID，通过 MTML 进程内存记录识别外部占用；xlurm 不调用 `mthreads-gmi`。任务设置 `MTHREADS_VISIBLE_DEVICES` UUID 和 `MUSA_VISIBLE_DEVICES` 设备序号，显示简写为 `mtt`。
 - MetaX 只加载一次 `libmxsml.so`，通过 MXSML API 发现设备索引、名称和 UUID，并查询设备可用性及逐卡计算进程，不再需要 `mx-smi`。不可用设备显示 `unhealthy`；查询失败、无效返回值或 UUID 变化时显示 `unknown`，暂停该卡的分配。任务将已分配设备索引写入 `CUDA_VISIBLE_DEVICES` 和 `MACA_VISIBLE_DEVICES`；显示简写为 `mx`。
 - T-Head PPU 通过 SDK 的 `libhgml.so` HGML v2 API 发现设备索引、UUID 和名称，并逐卡查询计算进程，不再需要 `ppu-smi`。查询失败、无效返回值或 UUID 变化时显示 `unknown`，暂停该卡的分配。任务将已分配 UUID 写入 `CUDA_VISIBLE_DEVICES`；显示简写为 `ppu`。
 - Hygon HCU 通过驱动的 `librocm_smi64.so` API 按 Unique ID 发现设备并查询进程占用，不再依赖 JSON 输出和 PATH。综合健康检查仍使用 `hy-smi --healthcheck`，优先选择 `/opt/dtk/.hyhal/bin/hy-smi`，再查 PATH。不健康设备不参与分配，探测失败会暂停分配。`ROCR_VISIBLE_DEVICES` 选择分配的设备索引，`HIP_VISIBLE_DEVICES` 和 `CUDA_VISIBLE_DEVICES` 使用过滤后的 `0..N-1` 编号。这些环境变量控制运行时可见性，不构成访问权限隔离。依赖进程查询检测外来负载前，需在实际负载下验证驱动的上报能力；成功返回空列表不能证明不存在驱动漏报的进程。显示简写为 `hcu`。
