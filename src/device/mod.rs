@@ -34,6 +34,7 @@ pub enum Backend {
 pub struct Inventory {
     pub devices: Vec<Device>,
     pub status: HashMap<String, String>,
+    pub monitoring_errors: HashMap<String, String>,
     nvidia: PathBuf,
     ascend: Option<ascend::Dcmi>,
     mthreads: Option<mthreads::Mtml>,
@@ -48,6 +49,7 @@ impl Inventory {
         let mut inventory = Self {
             devices: vec![],
             status: HashMap::new(),
+            monitoring_errors: HashMap::new(),
             nvidia: locate("nvidia-smi", &[]),
             ascend: None,
             mthreads: None,
@@ -159,11 +161,29 @@ impl Inventory {
                     })
                     .map(|text| !text.lines().any(|line| line.trim() == device.visible)),
                 Kind::Ascend => {
-                    let status = self
+                    let result = self
                         .ascend
                         .as_ref()
-                        .map_or("unknown", |driver| driver.status(device));
-                    self.status.insert(device.key(), status.into());
+                        .context("DCMI unavailable")
+                        .and_then(|driver| driver.status(device));
+                    let key = device.key();
+                    let status = match result {
+                        Ok(status) => {
+                            if self.monitoring_errors.remove(&key).is_some() {
+                                eprintln!("{key}: monitoring recovered ({status})");
+                            }
+                            status
+                        }
+                        Err(error) => {
+                            let error = format!("{error:#}");
+                            if self.monitoring_errors.get(&key) != Some(&error) {
+                                eprintln!("{key}: {error}");
+                                self.monitoring_errors.insert(key.clone(), error);
+                            }
+                            "unknown"
+                        }
+                    };
+                    self.status.insert(key, status.into());
                     continue;
                 }
                 Kind::Mthreads => {

@@ -334,6 +334,7 @@ impl<E: Executor> Scheduler<E> {
                 DeviceView {
                     device: device.clone(),
                     job,
+                    monitoring_error: self.inventory.monitoring_errors.get(&device.key()).cloned(),
                     status: if self.excluded_devices.contains(&device.key()) {
                         "disabled".into()
                     } else if job.is_some() {

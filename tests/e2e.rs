@@ -578,6 +578,7 @@ fn ascend_dcmi_queries_fail_closed_and_recover() {
         "npu-health-error",
         "probe-error",
         "dcmi-invalid-process-count",
+        "dcmi-missing-process-count",
         "dcmi-missing-device",
     ] {
         fs::write(h.dir.path().join(marker), "").unwrap();
@@ -613,6 +614,64 @@ fn ascend_dcmi_queries_fail_closed_and_recover() {
             .filter(|line| !line.starts_with("init "))
             .all(|line| line.ends_with(" 2") || line.ends_with(" 3"))
     );
+}
+
+#[test]
+fn ascend_process_errors_are_explained_and_recover_with_a_full_process_list() {
+    let mut harness = Harness::new("ascend", 1);
+    harness.drivers();
+    fs::write(harness.dir.path().join("dcmi-process-parameter-error"), "").unwrap();
+    fs::write(harness.dir.path().join("npu-many-processes"), "").unwrap();
+    harness.start();
+    harness.wait_device_status("unknown");
+
+    let devices: Vec<Value> =
+        serde_json::from_slice(&harness.run("xinfo", &["--json"]).stdout).unwrap();
+    for device in &devices {
+        let error = device["monitoring_error"].as_str().unwrap();
+        assert!(error.contains("process occupancy"));
+        assert!(error.contains("dcmiv2_get_device_resource_info"));
+        assert!(error.contains("-8001"));
+    }
+    let output = harness.run("xinfo", &[]);
+    let output = String::from_utf8_lossy(&output.stdout);
+    assert!(output.contains("Monitoring error:"));
+    assert!(output.contains("-8001"));
+
+    let job = harness.submit(&["-i", "2", "--wrap", "true"]);
+    assert_eq!(harness.job(job)["state"], "PENDING");
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let queries = fs::read_to_string(harness.dir.path().join("dcmi-queries")).unwrap();
+        if queries.lines().filter(|line| *line == "process 2").count() >= 3 {
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        sleep(Duration::from_millis(50));
+    }
+    let log = fs::read_to_string(harness.dir.path().join("daemon.log")).unwrap();
+    assert_eq!(log.matches("-8001").count(), 2);
+
+    fs::remove_file(harness.dir.path().join("dcmi-process-parameter-error")).unwrap();
+    harness.wait_device_status("busy");
+    let devices: Vec<Value> =
+        serde_json::from_slice(&harness.run("xinfo", &["--json"]).stdout).unwrap();
+    assert!(
+        devices
+            .iter()
+            .all(|device| device.get("monitoring_error").is_none())
+    );
+    assert_eq!(harness.job(job)["state"], "PENDING");
+    assert!(
+        fs::read_to_string(harness.dir.path().join("daemon.log"))
+            .unwrap()
+            .contains("monitoring recovered (busy)")
+    );
+    let output = harness.run("xinfo", &[]);
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("Monitoring error:"));
+
+    fs::remove_file(harness.dir.path().join("npu-many-processes")).unwrap();
+    harness.wait_state(job, "COMPLETED");
 }
 
 #[test]
@@ -1437,6 +1496,19 @@ fn hcu_smi_startup_errors_fail_closed() {
         .unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("cannot load HCU SMI"));
+}
+
+#[test]
+fn normal_completion_reaps_background_children() {
+    let mut harness = Harness::new("none", 1);
+    harness.start();
+    let job = harness.submit(&["-g", "0", "--wrap", "sleep 60 & echo $! > child.pid"]);
+    harness.wait_state(job, "COMPLETED");
+    let pid = fs::read_to_string(harness.dir.path().join("child.pid")).unwrap();
+    assert!(
+        !Path::new(&format!("/proc/{}", pid.trim())).exists(),
+        "background child survived normal completion"
+    );
 }
 
 #[test]

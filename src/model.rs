@@ -183,6 +183,8 @@ pub struct DeviceView {
     /// idle, busy (outside xlurm), unknown (probe failed), allocated, unhealthy,
     /// or disabled (excluded by the scheduler, even if already allocated).
     pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitoring_error: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -200,4 +202,24 @@ pub fn now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DeviceView;
+
+    #[test]
+    fn device_view_accepts_responses_without_monitoring_errors() {
+        let old_response = serde_json::json!({
+            "device": {
+                "kind": "ascend", "id": 1, "name": "Ascend950PR", "visible": "1",
+                "npu": null, "chip": null
+            },
+            "job": null,
+            "status": "unknown"
+        });
+        let view: DeviceView = serde_json::from_value(old_response.clone()).unwrap();
+        assert!(view.monitoring_error.is_none());
+        assert_eq!(serde_json::to_value(view).unwrap(), old_response);
+    }
 }

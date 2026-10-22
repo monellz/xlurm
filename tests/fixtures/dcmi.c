@@ -58,10 +58,15 @@ int dcmiv2_get_device_resource_info(int id,
                                 struct dcmi_proc_mem_info *processes, int *count) {
     query("process", id);
     if (id < 2 || id > 3 || marker("probe-error")) return -1;
-    *count = marker("dcmi-invalid-process-count") ? 33 : marker("npu-busy") ? 1 : 0;
-    if (*count == 1) {
-        processes[0].proc_id = 123;
-        processes[0].proc_mem_usage = 1024;
+    if (marker("dcmi-process-parameter-error")) return -8001;
+    if (marker("dcmi-missing-process-count")) return 0;
+    *count = marker("dcmi-invalid-process-count") ? 65 :
+             marker("npu-many-processes") ? 64 : marker("npu-busy") ? 1 : 0;
+    if (*count <= 64) {
+        for (int index = 0; index < *count; index++) {
+            processes[index].proc_id = 123 + index;
+            processes[index].proc_mem_usage = 1024;
+        }
     }
     return 0;
 }

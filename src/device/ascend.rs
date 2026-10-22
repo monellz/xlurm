@@ -146,29 +146,29 @@ impl Api {
         super::validate(devices)
     }
 
-    pub fn status(&self, device: &Device) -> &'static str {
-        let Ok(id) = c_int::try_from(device.id) else {
-            return "unknown";
-        };
+    pub fn status(&self, device: &Device) -> Result<&'static str> {
+        let id = c_int::try_from(device.id).context("invalid DCMI logical ID")?;
         let mut health = c_uint::MAX;
-        let result = unsafe { (self.health)(id, &mut health) };
-        if result != 0 || health == c_uint::MAX {
-            return "unknown";
-        }
+        check(
+            unsafe { (self.health)(id, &mut health) },
+            "dcmiv2_get_device_health",
+        )?;
+        ensure!(health != c_uint::MAX, "DCMI returned no health value");
         if health != 0 {
-            return "unhealthy";
+            return Ok("unhealthy");
         }
-        // The documented ABI writes at most 32 entries; proc_num is output-only.
-        let mut processes = [ProcessInfo::default(); 32];
-        let mut count = 0;
-        let result = unsafe { (self.processes)(id, processes.as_mut_ptr(), &mut count) };
-        if result != 0 || !(0..=32).contains(&count) {
-            "unknown"
-        } else if count == 0 {
-            "idle"
-        } else {
-            "busy"
-        }
+        let mut processes = [ProcessInfo::default(); 64];
+        let mut count = -1;
+        check(
+            unsafe { (self.processes)(id, processes.as_mut_ptr(), &mut count) },
+            "dcmiv2_get_device_resource_info",
+        )
+        .context("cannot determine Ascend process occupancy")?;
+        ensure!(
+            (0..=processes.len() as c_int).contains(&count),
+            "DCMI returned invalid process count {count}"
+        );
+        Ok(if count == 0 { "idle" } else { "busy" })
     }
 }
 
@@ -285,27 +285,31 @@ impl Legacy {
         }
         super::validate(devices)
     }
-    fn status(&self, device: &Device) -> &'static str {
-        let card = match c_int::try_from(device.npu.unwrap_or(device.id)) {
-            Ok(v) => v,
-            Err(_) => return "unknown",
-        };
-        let chip = c_int::try_from(device.chip.unwrap_or(0)).unwrap_or(0);
+    fn status(&self, device: &Device) -> Result<&'static str> {
+        let card =
+            c_int::try_from(device.npu.unwrap_or(device.id)).context("invalid DCMI card ID")?;
+        let chip = c_int::try_from(device.chip.unwrap_or(0)).context("invalid DCMI chip ID")?;
         let mut health = c_uint::MAX;
-        if unsafe { (self.health)(card, chip, &mut health) } != 0 || health == c_uint::MAX {
-            return "unknown";
-        }
+        check(
+            unsafe { (self.health)(card, chip, &mut health) },
+            "dcmi_get_device_health",
+        )?;
+        ensure!(health != c_uint::MAX, "DCMI returned no health value");
         if health != 0 {
-            return "unhealthy";
+            return Ok("unhealthy");
         }
         let mut processes = [LegacyProcessInfo::default(); 64];
         let mut count = processes.len() as c_int;
-        if unsafe { (self.processes)(card, chip, processes.as_mut_ptr(), &mut count) } != 0
-            || !(0..=64).contains(&count)
-        {
-            return "unknown";
-        }
-        if count == 0 { "idle" } else { "busy" }
+        check(
+            unsafe { (self.processes)(card, chip, processes.as_mut_ptr(), &mut count) },
+            "dcmi_get_device_resource_info",
+        )
+        .context("cannot determine Ascend process occupancy")?;
+        ensure!(
+            (0..=processes.len() as c_int).contains(&count),
+            "DCMI returned invalid process count {count}"
+        );
+        Ok(if count == 0 { "idle" } else { "busy" })
     }
 }
 impl Drop for Legacy {
@@ -357,7 +361,7 @@ impl Dcmi {
             Backend::Legacy(api) => api.discover(),
         }
     }
-    pub fn status(&self, device: &Device) -> &'static str {
+    pub fn status(&self, device: &Device) -> Result<&'static str> {
         match &self.backend {
             Backend::Api(api) => api.status(device),
             Backend::Legacy(api) => api.status(device),

@@ -163,6 +163,14 @@ xrun / xbatch / xqueue / xcancel / xinfo
 - Workers hold inherited file locks, allowing the scheduler to take over tasks after a restart without relying on bare PIDs to determine liveness. Exit results are written atomically.
 - Cancellation first sends SIGTERM to the process group, then sends SIGKILL if it is still running after one second. When the main task process exits, the same group is cleaned up, orphan processes are reaped, and devices are released.
 
+### Ascend monitoring failures
+
+For Ascend monitoring failures, `xinfo` prints the failed query and driver error below the device row; `xinfo --json` includes an optional `monitoring_error` field. This requires an updated daemon to supply the details. The daemon logs changes to the error and successful recovery, without repeating the same error on every poll. Diagnostics contain driver query information, not task commands or environments.
+
+A healthy chip can still show `unknown` when process occupancy cannot be queried. For example, a process-memory query can return DCMI error `-8001` when the driver lists an exited PID while surviving Python processes still hold device handles. This code alone does not establish that cause. On the affected host, an administrator can inspect remaining handles with `sudo fuser -v /dev/davinci*` and confirm the corresponding tasks with their owners before terminating them. A handle on `/dev/davinci_manager` alone does not identify which chip a process uses; the daemon itself also holds one. Do not infer availability from a missing `/proc/PID` entry or a failed query's zero process count. Allocation resumes only after monitoring succeeds and reports the device idle.
+
+xlurm cleans up its task's process group on cancellation, timeout, and normal completion. Tasks started outside xlurm, and descendants that deliberately leave their process group, require separate lifecycle management; xlurm does not automatically terminate them or reset devices.
+
 ## Multi-user Permissions
 
 | Operation | Regular user | Root administrator |

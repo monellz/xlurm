@@ -271,6 +271,9 @@ pub fn run(wrapper: Option<&str>) -> Result<i32> {
                             .unwrap_or_else(|| "-".into()),
                         view.device.name
                     );
+                    if let Some(error) = view.monitoring_error {
+                        println!("  Monitoring error: {error}");
+                    }
                 }
             }
         }
